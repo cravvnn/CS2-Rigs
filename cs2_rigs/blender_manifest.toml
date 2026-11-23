@@ -1,0 +1,17 @@
+schema_version = "1.0.0"
+
+id = "cs2_rigs"
+version = "0.1.0"
+name = "CS2 Rigs"
+tagline = "Counter-Strike 2 agents and animation clips from your install"
+maintainer = "Cravvnn"
+type = "add-on"
+
+blender_version_min = "5.3.0"
+
+license = ["SPDX:MIT"]
+platforms = ["windows-x64"]
+
+[permissions]
+network = "Download the Source2Viewer-CLI converter from its GitHub releases"
+files = "Read the installed game files and keep a cache of converted assets"
