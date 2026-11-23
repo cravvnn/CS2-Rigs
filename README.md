@@ -6,7 +6,7 @@ never touches the running game.
 
 Status: early. It imports an agent with materials, plays third-person game clips
 on it, puts a weapon in its hands with a finish on it, adds animation controls and
-brings in game maps. Finishes are a first pass: about half of them, without wear.
+brings in game maps.
 
 ![SAS agent running with an AK-47](docs/agent-with-weapon.png)
 ## Requirements
@@ -35,14 +35,28 @@ rate the game clips are authored at.
 
 ### Finishes
 
-With a weapon held, choose a **Finish** and press **Apply Finish**. The list holds
-the finishes that are painted as one texture in the weapon's own layout (the
-game's custom paint and gunsmith styles, 692 of its 1,479 finishes), shown as
-new. Finishes the game builds up from patterns, colours and masks at run time,
-wear, stickers and gloves are not done yet. Older finishes are laid out for the
-weapon's previous model, so applying one switches the weapon to that body.
+With a weapon held, choose a **Finish**, set **Wear** and **Seed**, and press
+**Apply Finish**. The finish is built the way the game builds it, from the
+weapon's own textures, the finish's pattern and colours and the game's wear and
+grime textures, so it wears like it does in the game. The first time takes a
+few seconds; the result is kept in the cache and packed into the .blend.
 
-![AK-47 with the Aquamarine Revenge finish](docs/finish.png)
+- **Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
+  the range the finish allows.
+- **Seed** moves the pattern, wear and grime around. A seed gives the same
+  result every time here, but not the placement that seed has in the game.
+- Older finishes are laid out for the weapon's previous model, so applying one
+  switches the weapon to that body.
+
+All weapon and knife finishes can be applied. A few parts are left out and
+named when you apply a finish that has them: overlays, halftone and masked
+spray, case hardening and patina ageing, which some of the newest finishes use. Effects the
+game adds while rendering (pearlescence, glitter, iridescence), stickers and
+glove finishes are not done.
+
+![AK-47 with the Bloodsport finish](docs/finish.png)
+
+![AK-47 Jungle Spray, battle-scarred](docs/finish-worn.png)
 
 ### Controls
 
@@ -83,7 +97,8 @@ version and converter build. A game update starts a new folder; the add-on
 preferences have buttons to clear old ones or everything.
 ## Development
 
-`cs2_rigs/core` has no Blender imports and is covered by `tests/`:
+`cs2_rigs/core` has no Blender imports and is covered by `tests/` (which need
+numpy for the compositor tests):
 
     .venv\Scripts\python -m pytest -q tests
 
@@ -95,8 +110,9 @@ preferences have buttons to clear old ones or everything.
 `tools/map_check.py` run the same way and check the controls, weapon attachment,
 finishes and maps. `tools/panel_check.py` draws the panel without a window, to
 catch a wrong icon, property or operator name. `tools/sweep.py` imports every
-agent and holds every weapon, and writes a report of what fails; converting
-everything fills about 5.5 GB of cache.
+agent and holds every weapon, and `tools/finish_sweep.py` reads every finish
+of every weapon and applies one to each; both write a report of what fails.
+Converting everything fills about 6 GB of cache.
 
 ## Licence
 

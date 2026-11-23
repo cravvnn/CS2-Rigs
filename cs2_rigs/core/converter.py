@@ -120,6 +120,10 @@ class Converter:
         """Everything the converter can print about one resource, as text."""
         return self._run(["-i", str(package), "-f", path, "-a"], timeout=300)
 
+    def dump_folder(self, package: Path, folder: str, extension: str) -> str:
+        """The data block of every resource of one type under a folder, as one text."""
+        return self._run(["-i", str(package), "-f", folder, "-e", extension, "-b", "DATA"], timeout=600)
+
     def _convert(self, package: Path, path: str, out_dir: Path, suffix: str, options: list[str]) -> Path:
         """Decompile one resource into `out_dir`; return the converted file.
 
@@ -161,9 +165,10 @@ class Converter:
             options += ["--gltf_export_materials", "--gltf_textures_adapt"]
         return self._convert(package, path, out_dir, ".glb", options)
 
-    def export_texture(self, package: Path, path: str, out_dir: Path) -> Path:
-        """Convert one compiled texture to .png in `out_dir`; return the .png path."""
-        return self._convert(package, path, out_dir, ".png", [])
+    def export_texture(self, package: Path, path: str, out_dir: Path, suffix: str = ".png") -> Path:
+        """Convert one compiled texture in `out_dir`; return the image. Float textures come out as .exr."""
+        return self._convert(package, path, out_dir, suffix, [])
+
     def export_model(self, package: Path, model_path: str, out_dir: Path, clips: list[str], materials: bool) -> Path:
         """Export a model with the named clips. A model exported without a clip has no skeleton."""
         if not clips:

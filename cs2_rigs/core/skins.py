@@ -18,13 +18,6 @@ ICON_SUFFIX = "_light_png.vtex_c"
 ITEMS_GAME = "scripts/items/items_game.txt"
 ENGLISH = "resource/csgo_english.txt"
 CATALOGUE_VERSION = 1
-# Custom paint job and gunsmith: one texture painted in the weapon's own layout,
-# which can be shown as it is. Every other style is built up from patterns,
-# colours and masks at run time.
-PAINTED_STYLES = (7, 9)
-LEGACY_MATERIAL = "materials/models/weapons/customization/paints/vmats/{name}.vmat_c"
-# Stand-in textures a kit's material names when it has nothing of its own.
-PLACEHOLDER_FOLDERS = ("materials/default/", "workshop/paintkits/templates/")
 # Catalogue weapon keys whose item name is not 'weapon_<key>'.
 ITEM_NAMES = {
     "glock18": "weapon_glock",
@@ -139,7 +132,7 @@ class PaintKit:
     wear_min: float
     wear_max: float
     weapons: tuple[str, ...]  # item class names such as "weapon_ak47"
-    fields: dict  # raw paint kit block, kept for the texture compositor
+    fields: dict  # raw paint kit block
 
 
 def _items_root(data: dict) -> dict:
@@ -240,39 +233,10 @@ def item_name(weapon_key: str) -> str:
     return ITEM_NAMES.get(weapon_key, f"weapon_{weapon_key}")
 
 
-def is_painted(kit: PaintKit) -> bool:
-    return kit.style in PAINTED_STYLES
-
-
 def uses_legacy_model(kit: PaintKit) -> bool:
     """Kits made before the weapon models were redone are laid out for the old body."""
     return kit.fields.get("use_legacy_model") == "1"
 
-
-def material_path(kit: PaintKit) -> str:
-    """The kit's material in the main package: a composite material for newer kits."""
-    composite = kit.fields.get("composite_material_path")
-    return f"{composite}_c" if composite else LEGACY_MATERIAL.format(name=kit.name)
-
-
-def paint_textures(dump: str) -> dict[str, str]:
-    """A painted kit's own textures, by role, from the converter's dump of its material.
-
-    Roles are 'colour', 'roughness' and 'normal'; only 'colour' is always there
-    for a painted kit. Values are package paths of compiled textures.
-    """
-    found = {}
-    # Older kits: a weapon-paint material with named texture inputs.
-    named = dict(re.findall(r'm_name = "(\w+)"\s+m_pValue = resource:"([^"]+)"', dump))
-    for role, param in (("colour", "g_tPattern"), ("roughness", "g_tPaintRoughness"), ("normal", "g_tNormal")):
-        if param in named:
-            found[role] = named[param]
-    # Newer kits: a composite material; its textures are named after their role.
-    for path in re.findall(r"\S+\.vtex\b", dump):
-        for role, marker in (("colour", "_albedo_texture_"), ("roughness", "_roughness_texture_"), ("normal", "_normal_map_texture_")):
-            if marker in path:
-                found.setdefault(role, path)
-    return {role: f"{path}_c" for role, path in found.items() if not path.startswith(PLACEHOLDER_FOLDERS)}
 
 def kits_for(kits: list[PaintKit], weapon: str) -> list[PaintKit]:
     """Kits offered on one item class name, sorted by display label."""

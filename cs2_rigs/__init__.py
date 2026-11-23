@@ -6,7 +6,7 @@ import functools
 import shutil
 
 import bpy
-from bpy.props import BoolProperty, CollectionProperty, EnumProperty, StringProperty
+from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from . import importer, maps, paint, rig, session
 from .core import cache as cache_mod
@@ -22,6 +22,7 @@ _weapons: dict[str, catalog_mod.Weapon] = {}
 _maps: dict[str, catalog_mod.GameMap] = {}
 _clip_labels: list[str] = []
 _kits: dict[str, skins_mod.PaintKit] = {}
+_paintable: set[str] = set()  # kits whose recipe is in the game files
 _skin_items: dict[str, list[tuple[str, str, str]]] = {}  # per weapon key
 _map_job: maps.BuildJob | None = None
 
@@ -52,15 +53,15 @@ def _held_weapon(armature: bpy.types.Object | None) -> catalog_mod.Weapon | None
 
 
 def _skin_enum(self, context):
-    """Painted finishes for the weapon the agent holds."""
+    """Finishes for the weapon the agent holds."""
     armature = importer.find_agent_armature(context)
     key = importer.held_weapon_key(armature) if armature else ""
     if key not in _skin_items:
         offered = skins_mod.kits_for(list(_kits.values()), skins_mod.item_name(key))
         _skin_items[key] = [
-            (kit.name, kit.label, f"{kit.rarity or 'finish'} ({kit.name})") for kit in offered if skins_mod.is_painted(kit)
+            (kit.name, kit.label, f"{kit.rarity or 'finish'} ({kit.name})") for kit in offered if kit.name in _paintable
         ]
-    return _skin_items[key] or [("NONE", "No painted finishes", "This weapon has no finish that can be shown yet")]
+    return _skin_items[key] or [("NONE", "No finishes", "This weapon has no finish that can be shown")]
 
 
 def _fill_clips(context: bpy.types.Context) -> None:
@@ -178,6 +179,8 @@ class CS2RIG_OT_refresh(bpy.types.Operator):
         ]
         _kits.clear()
         _kits.update({kit.name: kit for kit in current.skins()})
+        _paintable.clear()
+        _paintable.update(kit.name for kit in _kits.values() if current.can_apply(kit))
         _skin_items.clear()
         _fill_clips(context)
         self.report({"INFO"}, f"Found {len(_agent_items)} agents, {len(_clip_labels)} clips and {len(_maps)} maps.")
@@ -278,7 +281,7 @@ class CS2RIG_OT_remove_weapon(_AgentOperator):
 class CS2RIG_OT_apply_skin(_AgentOperator):
     bl_idname = "cs2rig.apply_skin"
     bl_label = "Apply Finish"
-    bl_description = "Put the chosen finish on the held weapon, as new. Only finishes painted as one texture are offered"
+    bl_description = "Put the chosen finish on the held weapon, with the wear and pattern seed set below. Takes a few seconds"
 
     @classmethod
     def poll(cls, context):
@@ -291,8 +294,12 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         if kit is None:
             self.report({"ERROR"}, "Choose a finish first.")
             return {"CANCELLED"}
-        paint.apply_skin(context, session.get(), importer.find_agent_armature(context), kit)
-        self.report({"INFO"}, f"Applied {kit.label}.")
+        wm = context.window_manager
+        missing = paint.apply_skin(context, session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
+        if missing:
+            self.report({"WARNING"}, f"Applied {kit.label}, without its {' and '.join(missing)}.")
+        else:
+            self.report({"INFO"}, f"Applied {kit.label}.")
         return {"FINISHED"}
 
 
@@ -513,6 +520,9 @@ class CS2RIG_PT_main(bpy.types.Panel):
         if armature is not None and importer.held_weapon_key(armature):
             box.prop(wm, "cs2rig_skin", text="Finish")
             row = box.row(align=True)
+            row.prop(wm, "cs2rig_wear", slider=True)
+            row.prop(wm, "cs2rig_seed")
+            row = box.row(align=True)
             row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
             row.operator("cs2rig.remove_skin", text="", icon="X")
 
@@ -584,6 +594,20 @@ def register():
     wm.cs2rig_agent = EnumProperty(name="Agent", items=lambda self, context: _agent_items or _PRESS_REFRESH)
     wm.cs2rig_weapon = EnumProperty(name="Weapon", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
     wm.cs2rig_skin = EnumProperty(name="Finish", items=_skin_enum)
+    wm.cs2rig_wear = FloatProperty(
+        name="Wear",
+        description="How worn the finish is, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
+        min=0.0,
+        max=1.0,
+        default=0.0,
+    )
+    wm.cs2rig_seed = IntProperty(
+        name="Seed",
+        description="Varies where the pattern, wear and grime fall. The placement for a seed is not the one the game gives it",
+        min=0,
+        max=1000,
+        default=0,
+    )
     wm.cs2rig_map = EnumProperty(name="Map", items=lambda self, context: _map_items or _PRESS_REFRESH)
     wm.cs2rig_map_link = BoolProperty(
         name="Link",
@@ -602,7 +626,7 @@ def register():
 
 def unregister():
     wm = bpy.types.WindowManager
-    for name in ("cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
+    for name in ("cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

@@ -45,6 +45,15 @@ class Cache:
     def skins_file(self) -> Path:
         return self.version_dir / "skins.json"
 
+    @property
+    def finishes_file(self) -> Path:
+        return self.version_dir / "finishes.json"
+
+    def finish_dir(self, key: str) -> Path:
+        """Where the textures composed for one finish, weapon body, wear and seed are kept."""
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
+        return self.version_dir / "finishes" / digest
+
     def model_dir(self, model_key: str) -> Path:
         return self.version_dir / "models" / model_key.replace("/", "__")
 

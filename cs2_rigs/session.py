@@ -3,13 +3,14 @@
 from __future__ import annotations
 
 import os
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from pathlib import Path
 
 import bpy
 
 from .core import catalog as catalog_mod
 from .core import download
+from .core import finish as finish_mod
 from .core import skins as skins_mod
 from .core.cache import Cache, default_cache_root
 from .core.converter import CLI_NAME, Converter, find_cli
@@ -34,6 +35,8 @@ class Session:
     cache: Cache
     _catalog: dict | None = None
     _skins: list | None = None
+    _finishes: dict | None = None
+    _materials: dict = field(default_factory=dict)
 
     def catalog(self) -> dict:
         if self._catalog is None:
@@ -43,21 +46,47 @@ class Session:
         return self._catalog
 
     def skins(self) -> list[skins_mod.PaintKit]:
-        """Every weapon, knife and glove finish in the game. Nothing applies them to a model yet."""
+        """Every weapon, knife and glove finish in the game."""
         if self._skins is None:
             self._skins = skins_mod.load_or_build_catalogue(self.converter, self.install.main_package, self.cache.skins_file)
         return self._skins
 
-    def paint_textures(self, kit: skins_mod.PaintKit) -> dict[str, Path]:
-        """Convert a painted kit's textures; returns .png paths by role ('colour', 'roughness', 'normal')."""
-        package = self.install.main_package
-        textures = skins_mod.paint_textures(self.converter.dump(package, skins_mod.material_path(kit)))
-        if "colour" not in textures:
-            raise SetupError(f"{kit.label} has no painted texture in the game files.")
-        return {
-            role: self.converter.export_texture(package, path, self.cache.texture_dir(path))
-            for role, path in textures.items()
-        }
+    def finishes(self) -> dict:
+        """Every finish's materials and recipes. Reading them takes a while the first time."""
+        if self._finishes is None:
+            self._finishes = finish_mod.load_or_build_library(self.converter, self.install.main_package, self.cache.finishes_file)
+        return self._finishes
+
+    def can_apply(self, kit: skins_mod.PaintKit) -> bool:
+        return finish_mod.recipe_path(kit.name, kit.fields.get("composite_material_path", "")) in self.finishes()["recipes"]
+
+    def material(self, path: str) -> dict:
+        """The values of one material in the game package, by name."""
+        path = path.replace("\\", "/").removesuffix("_c")
+        if path not in self._materials:
+            dump = finish_mod.split_dump(self.converter.dump(self.install.main_package, path + "_c"))
+            if path not in dump:
+                raise SetupError(f"The material '{path}' is not in the game files.")
+            self._materials[path] = finish_mod.material_values(dump[path])
+        return self._materials[path]
+
+    def finish_values(self, kit: skins_mod.PaintKit, body_material: str, seed: int, wear: float) -> dict:
+        """The shader values for a finish on the weapon body that uses `body_material`."""
+        target = self.material(body_material)
+        inputs = target.get("composite_inputs")
+        if not inputs:
+            raise SetupError("This weapon cannot take a finish: its material names no paint inputs.")
+        recipe = finish_mod.recipe_path(kit.name, kit.fields.get("composite_material_path", ""))
+        try:
+            return finish_mod.resolve(self.finishes(), recipe, self.material(inputs), target, seed, wear)
+        except KeyError as exc:
+            raise SetupError(f"{kit.label} cannot be shown yet: {exc}") from exc
+
+    def texture(self, path: str) -> Path:
+        """Convert one texture named by a material (a '.vtex' path); returns the image file."""
+        path = path.replace("\\", "/").removesuffix("_c") + "_c"
+        suffix = ".exr" if "_pfm_" in path.rsplit("/", 1)[-1] else ".png"
+        return self.converter.export_texture(self.install.main_package, path, self.cache.texture_dir(path), suffix)
 
     def agent(self, key: str) -> catalog_mod.Agent:
         agent = next((a for a in catalog_mod.catalog_agents(self.catalog()) if a.key == key), None)

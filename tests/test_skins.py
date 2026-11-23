@@ -256,40 +256,9 @@ def test_json_round_trip_returns_equal_kits():
     assert skins.from_json(encoded) == kits
 
 
-def test_painted_kits_name_their_textures():
-    legacy = """
-        m_name = "g_tColor"
-        m_pValue = resource:"materials/default/default_weapon_color_tga_a59dc9c7.vtex"
-        m_name = "g_tPaintRoughness"
-        m_pValue = resource:"materials/paints/custom/red_rough_psd_d0c44794.vtex"
-        m_name = "g_tPattern"
-        m_pValue = resource:"materials/paints/custom/red_tga_515b3d45.vtex"
-        m_name = "g_tNormal"
-        m_pValue = resource:"materials/default/default_normal_tga_1.vtex"
-    """
-    assert skins.paint_textures(legacy) == {
-        "colour": "materials/paints/custom/red_tga_515b3d45.vtex_c",
-        "roughness": "materials/paints/custom/red_rough_psd_d0c44794.vtex_c",
-    }
-    composite = """
-        9152B2DF1CD2D257  items/assets/paintkits/c34/bus_albedo_texture_tga_856aaf50.vtex
-        1464DE57E99D875E  materials/default/default_ao_tga_e5dd0c66.vtex
-        4094EEB3A7E1F8EA  items/assets/paintkits/c34/bus_normal_map_texture_tga_9bf1e72d.vtex
-    """
-    assert skins.paint_textures(composite) == {
-        "colour": "items/assets/paintkits/c34/bus_albedo_texture_tga_856aaf50.vtex_c",
-        "normal": "items/assets/paintkits/c34/bus_normal_map_texture_tga_9bf1e72d.vtex_c",
-    }
-    assert skins.paint_textures("nothing here") == {}
-
-
-def test_kit_material_and_item_names():
+def test_item_names_and_body_choice():
     kits = {kit.name: kit for kit in catalogue()}
-    cobra = kits["cu_ak47_cobra"]
-    assert skins.is_painted(cobra) and not skins.is_painted(kits["an_tiger_orange"])
-    assert skins.material_path(cobra) == "materials/models/weapons/customization/paints/vmats/cu_ak47_cobra.vmat_c"
-    assert skins.material_path(kits["glove_driver_unlisted"]) == "gloves/paints/volatile_02/driver.vcompmat_c"
-    assert not skins.uses_legacy_model(cobra)
+    assert not skins.uses_legacy_model(kits["cu_ak47_cobra"])
     assert skins.item_name("ak47") == "weapon_ak47"
     assert skins.item_name("knife_bayonet") == "weapon_bayonet"
     assert skins.item_name("knife_karambit") == "weapon_knife_karambit"
