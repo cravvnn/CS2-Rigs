@@ -1,6 +1,6 @@
 """Build a demo scene: an agent with a weapon, a game clip and IK controls.
 
-    blender --background --factory-startup --python tools/make_demo.py -- <out.blend> [agent] [weapon] [clip] [finish]
+    blender --background --factory-startup --python tools/make_demo.py -- <out.blend> [agent] [weapon] [clip] [finish] [wear]
 """
 
 import sys
@@ -17,6 +17,7 @@ agent = args[1] if len(args) > 1 else "ctm_sas/ctm_sas"
 weapon = args[2] if len(args) > 2 else "ak47"
 clip = args[3] if len(args) > 3 else "world/rifle/_default_rifle/run_n_rifle"
 finish = args[4] if len(args) > 4 else ""  # a paint kit name such as cu_ak47_cobra
+wear = float(args[5]) if len(args) > 5 else 0.0
 
 bpy.ops.wm.read_factory_settings(use_empty=True)
 cs2_rigs.register()
@@ -31,6 +32,7 @@ wm.cs2rig_weapon = weapon
 assert bpy.ops.cs2rig.attach_weapon() == {"FINISHED"}
 if finish:
     wm.cs2rig_skin = finish
+    wm.cs2rig_wear = wear
     assert bpy.ops.cs2rig.apply_skin() == {"FINISHED"}
 wm.cs2rig_clip = clip
 assert bpy.ops.cs2rig.load_clip() == {"FINISHED"}
