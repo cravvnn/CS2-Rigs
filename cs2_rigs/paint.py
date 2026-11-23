@@ -175,6 +175,16 @@ def finish_textures(session: Session, kit: skins_mod.PaintKit, body_material: st
     return files, missing
 
 
+def _base_material(material: bpy.types.Material | None) -> bpy.types.Material | None:
+    """The stock material a painted one stands in for, or None."""
+    if material is None or BASE_MATERIAL_PROP not in material.keys():
+        return None
+    base = material[BASE_MATERIAL_PROP]
+    if isinstance(base, str):  # files saved before the reference was kept
+        base = bpy.data.materials.get(base)
+    return base if isinstance(base, bpy.types.Material) and base != material else None
+
+
 def worn_skin(armature: bpy.types.Object) -> str:
     """The name of the kit on the held weapon, or ''."""
     return next((obj[SKIN_PROP] for obj in armature.children_recursive if SKIN_PROP in obj.keys()), "")
@@ -190,7 +200,12 @@ def remove_skin(armature: bpy.types.Object) -> None:
             painted = slot.material
             if painted is None or BASE_MATERIAL_PROP not in painted.keys():
                 continue
-            slot.material = bpy.data.materials.get(painted[BASE_MATERIAL_PROP])
+            base = _base_material(painted)
+            if base is None:
+                # Saved by an older version, which let the stock material be dropped on save.
+                # Keep the painted one: a new finish can still go on it.
+                continue
+            slot.material = base
             if painted.users == 0:
                 bpy.data.materials.remove(painted)
     legacy, current = _bodies(armature)
@@ -217,9 +232,11 @@ def apply_skin(context: bpy.types.Context, session: Session, armature: bpy.types
     wear = min(max(wear, kit.wear_min), kit.wear_max)
     files, missing = finish_textures(session, kit, _game_material(slot.material), wear, seed)  # may take a while the first time
 
+    base = _base_material(slot.material) or slot.material
     painted = slot.material.copy()
-    painted.name = f"{slot.material.name}.{kit.name}"
-    painted[BASE_MATERIAL_PROP] = slot.material.name
+    painted.name = f"{base.name}.{kit.name}"
+    # A reference rather than a name: it keeps the stock material in the file when it is saved.
+    painted[BASE_MATERIAL_PROP] = base
     slot.material = painted
     tree = painted.node_tree
     shader = _principled(painted)

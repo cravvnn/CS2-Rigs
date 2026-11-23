@@ -108,7 +108,8 @@ numpy for the compositor tests):
 
 `tools/rig_check.py`, `tools/weapon_check.py`, `tools/skin_check.py` and
 `tools/map_check.py` run the same way and check the controls, weapon attachment,
-finishes and maps. `tools/panel_check.py` draws the panel without a window, to
+finishes and maps. `tools/reopen_check.py` saves and reopens a file with a finish on.
+`tools/panel_check.py` draws the panel without a window, to
 catch a wrong icon, property or operator name. `tools/sweep.py` imports every
 agent and holds every weapon, and `tools/finish_sweep.py` reads every finish
 of every weapon and applies one to each; both write a report of what fails.
