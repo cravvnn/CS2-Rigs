@@ -230,3 +230,13 @@ def test_maps_list_playable_maps_first(tmp_path):
     assert [m.is_backdrop for m in found] == [False, False, True, True]
     assert found[1].world_path == "maps/de_dust2.vmap_c"
     assert catalog.maps_in(tmp_path / "missing") == []
+
+
+def test_missing_output_names_a_path_too_long_for_windows(monkeypatch):
+    monkeypatch.setattr(converter.sys, "platform", "win32")
+    package = Path("pak01_dir.vpk")
+    short = converter._missing_output(Path("C:/c/a.png"), "materials/a.vtex_c", package)
+    assert "did not write a.png" in short
+    deep = Path("C:/" + "d" * 300 + "/a.png")
+    message = converter._missing_output(deep, "materials/a.vtex_c", package)
+    assert "longer than Windows allows" in message and "Cache Folder" in message

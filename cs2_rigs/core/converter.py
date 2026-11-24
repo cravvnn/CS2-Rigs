@@ -67,6 +67,20 @@ def exported_path(out_dir: Path, path: str, suffix: str = ".glb") -> Path:
     """Where the converter writes 'a/b.vmdl_c', 'maps/x.vmap_c' or 'a/t.vtex_c' under `out_dir`."""
     return out_dir / Path(path.removesuffix("_c")).with_suffix(suffix)
 
+WINDOWS_MAX_PATH = 259  # characters; Blender cannot open longer paths even with Windows long paths on
+
+
+def _missing_output(staged: Path, path: str, package: Path) -> str:
+    """Why a conversion left no file: usually a path too long for Windows, otherwise the file is not in the package."""
+    length = len(str(staged))
+    if sys.platform == "win32" and length > WINDOWS_MAX_PATH:
+        return (
+            f"The path for {staged.name} is {length} characters, longer than Windows allows ({WINDOWS_MAX_PATH}). "
+            "Choose a shorter Cache Folder in the add-on preferences, such as C:\\cs2-rigs."
+        )
+    return f"The converter finished but did not write {staged.name}. Is '{path}' in {package.name}?"
+
+
 class Converter:
     def __init__(self, cli: Path):
         self.cli = Path(cli)
@@ -143,8 +157,9 @@ class Converter:
         staging.mkdir()
         try:
             self._run(["-i", str(package), "-o", str(staging), "-d", "-f", path, *options], timeout=EXPORT_TIMEOUT)
-            if not exported_path(staging, path, suffix).is_file():
-                raise ConverterError(f"The converter finished but did not write {result.name}. Is '{path}' in {package.name}?")
+            staged = exported_path(staging, path, suffix)
+            if not staged.is_file():
+                raise ConverterError(_missing_output(staged, path, package))
             try:
                 staging.replace(out_dir)
             except OSError:
