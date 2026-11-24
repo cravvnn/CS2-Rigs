@@ -14,6 +14,7 @@ import os
 import shutil
 import subprocess
 import sys
+import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
@@ -196,7 +197,7 @@ class Converter:
         if result.is_file():
             return result
         # Staging is per process, so two Blenders converting the same thing cannot collide.
-        staging = out_dir.with_name(f"{out_dir.name}{STAGING_MARK}{os.getpid()}")
+        staging = out_dir.with_name(f"{out_dir.name}{STAGING_MARK}{os.getpid()}-{threading.get_ident()}")
         out_dir.parent.mkdir(parents=True, exist_ok=True)
         abandoned = [p for p in out_dir.parent.glob(out_dir.name + STAGING_MARK + "*") if time.time() - p.stat().st_mtime > STAGING_MAX_AGE]
         for leftover in (staging, out_dir, *abandoned):

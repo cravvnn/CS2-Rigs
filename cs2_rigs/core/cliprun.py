@@ -82,6 +82,7 @@ def run_chunk(
     log: Callable[[str], None] = print,
     stall: float = STALL,
     should_stop: Callable[[], bool] = lambda: False,
+    started_process: Callable[[subprocess.Popen], None] = lambda _: None,
 ) -> bool:
     """Run Blender over job['clips'] until each has a result, restarting after a crash or stall.
 
@@ -100,6 +101,7 @@ def run_chunk(
         seen, stalled, stopped = len(pending), False, False
         with open(work_dir / "blender.log", "a", encoding="utf-8") as blender_log:
             process = subprocess.Popen(command, stdout=blender_log, stderr=subprocess.STDOUT, creationflags=flags)
+            started_process(process)
             while process.poll() is None:
                 time.sleep(POLL)
                 left = [c for c in pending if c not in read_results(results_path, since)]

@@ -752,8 +752,14 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             elif kind == "list":
                 return self._load(context, browser, browser.visible[index])
             elif kind == "button":
+                if not bpy.ops.cs2rig.build_clip_previews.poll():
+                    browser.message = "Press Refresh first, or wait for the previews being built to finish."
+                    return {"RUNNING_MODAL"}
                 close_browser()
-                bpy.ops.cs2rig.build_clip_previews("INVOKE_DEFAULT")
+                try:
+                    bpy.ops.cs2rig.build_clip_previews("INVOKE_DEFAULT")
+                except RuntimeError:
+                    pass  # the operator has reported why
                 return {"FINISHED"}
             return {"RUNNING_MODAL"}
         if event.type in {"UP_ARROW", "DOWN_ARROW"} and browser.visible:
@@ -792,7 +798,10 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             return {"RUNNING_MODAL"}
         close_browser()
         context.window_manager.cs2rig_clip = clip.label
-        bpy.ops.cs2rig.load_clip()
+        try:
+            bpy.ops.cs2rig.load_clip()
+        except RuntimeError:
+            pass  # the operator has reported why
         return {"FINISHED"}
 
     def cancel(self, context):

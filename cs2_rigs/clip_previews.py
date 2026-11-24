@@ -27,7 +27,7 @@ def work_dir(session: Session) -> Path:
 def clips_to_build(session: Session, census: dict) -> list[str]:
     """Agent clips without a preview yet, gameplay clips first."""
     preview_dir = session.cache.clip_preview_dir()
-    return [clip for clip in cliprun.agent_clips(census) if not (preview_dir / clipdata.preview_name(clip)).is_file()]
+    return [clip for clip in cliprun.agent_clips(census) if clipdata.read_preview(preview_dir, clip) is None]
 
 
 def write_status(session: Session, census: dict) -> dict:
@@ -51,11 +51,16 @@ class PreviewJob:
         self.stage = "Reading clips"
         self.error = ""
         self._cancel = False
+        self._process = None
         self._thread = threading.Thread(target=self._run, args=(session, bpy.app.binary_path), daemon=True)
         self._thread.start()
 
     def cancel(self) -> None:
+        """Stop now: the background Blender is killed here, since the thread may not outlive Blender."""
         self._cancel = True
+        process = self._process
+        if process is not None and process.poll() is None:
+            process.kill()
 
     def _run(self, session: Session, blender: str) -> None:
         try:
@@ -80,12 +85,17 @@ class PreviewJob:
         }
         for chunk in cliprun.chunks(todo):
             finished = cliprun.run_chunk(blender, BUILD_SCRIPT, {**job, "clips": chunk}, folder, log=lambda _: None,
-                                         should_stop=lambda: self._cancel)
+                                         should_stop=lambda: self._cancel, started_process=self._started)
             write_status(session, census)
             if not finished:
                 break
         shutil.rmtree(folder / "scratch", ignore_errors=True)
         write_status(session, census)
+
+    def _started(self, process) -> None:
+        self._process = process
+        if self._cancel:
+            process.kill()
 
     @property
     def running(self) -> bool:

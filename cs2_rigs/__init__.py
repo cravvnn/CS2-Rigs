@@ -229,6 +229,9 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
         if _building() is not None:
             self.report({"ERROR"}, "A map is being built. Wait for it to finish.")
             return {"CANCELLED"}
+        if _preview_job is not None and _preview_job.running:
+            self.report({"ERROR"}, "Clip previews are being built. Wait for them to finish.")
+            return {"CANCELLED"}
         cache = session.get().cache
         folders = cache.stale_dirs() + ([cache.version_dir] if self.everything and cache.version_dir.is_dir() else [])
         freed = sum(cache_mod.folder_size(folder) for folder in folders)
@@ -499,7 +502,9 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
         if kit is None:
             self.report({"ERROR"}, "Choose gloves first.")
             return {"CANCELLED"}
-        gloves.apply_gloves(context, session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
+        armature = importer.find_agent_armature(context)
+        with importer.working_on(context, armature):
+            gloves.apply_gloves(context, session.get(), armature, kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
         log_mod.logger.info("gloves %s wear %.2f seed %d", kit.name, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
         self.report({"INFO"}, f"Applied {gloves_mod.label(kit)}.")
         return {"FINISHED"}
