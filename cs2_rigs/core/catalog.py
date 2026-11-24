@@ -6,12 +6,13 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import clipdata
 from .converter import Converter, PackageEntry
 
 AGENT_PREFIX = "agents/models/"
 CLIP_PREFIX = "animation/anims/"
-# Third-person clips. Viewmodel clips target the first-person skeleton and UI
-# clips are menu poses; both stay out of the default browser.
+# Third-person clips made for gameplay. Menu poses ('ui_anims') use the same
+# skeleton; viewmodel, chicken and egg clips do not fit an agent.
 WORLD_CLIP_PREFIX = "animation/anims/world/"
 BASE_CLIP = "animation/anims/world/knife/_default_knife/idle_knife"
 WEAPON_PREFIX = "weapons/models/"
@@ -139,6 +140,7 @@ def clip_label(clip: str) -> str:
 # Weapon kind -> the folder of third-person clips made for holding it.
 _CLIP_FAMILY = {"knife": "knife", "pist": "pistol", "rif": "rifle", "smg": "rifle", "snip": "rifle", "shot": "rifle", "mach": "rifle"}
 _EQUIPMENT = ("c4", "healthshot")
+_HELD_LIKE_PISTOL = ("taser",)  # not named weapon_pist_*, but held with the pistol clips
 SHARED_CLIP_FAMILY = "shared"  # deaths, flinches and jumps, played over any weapon
 
 
@@ -146,6 +148,8 @@ def clip_family(weapon: Weapon) -> str:
     """'rifle', 'pistol', 'knife', 'grenade' or 'equipment': which clips hold this weapon correctly."""
     if weapon.kind in _CLIP_FAMILY:
         return _CLIP_FAMILY[weapon.kind]
+    if weapon.key in _HELD_LIKE_PISTOL:
+        return "pistol"
     return "equipment" if weapon.key in _EQUIPMENT else "grenade"
 
 
@@ -157,6 +161,27 @@ def family_of_clip(clip: str) -> str:
 
 def clip_fits(clip: str, weapon: Weapon | None) -> bool:
     return weapon is None or family_of_clip(clip) in (clip_family(weapon), SHARED_CLIP_FAMILY)
+
+
+def clips_for_weapon(clips: list[str], weapon: Weapon | None) -> list[str]:
+    """Clips for the held weapon: its own folder first (a karambit's own draw), then its
+    family's default clips it does not replace, then the shared ones. Takes full clip paths."""
+    if weapon is None:
+        return list(clips)
+    family = clip_family(weapon)
+    base = f"{WORLD_CLIP_PREFIX}{family}/"
+    folders = sorted({clipdata.folder_of(clip) for clip in clips if clip.startswith(base)})
+    own = clipdata.weapon_folder(weapon.key, folders)
+    return clipdata.clips_for_weapon(clips, f"{base}_default_{family}", own, WORLD_CLIP_PREFIX + SHARED_CLIP_FAMILY)
+
+
+_CLIP_ORDER = ("world", "ui_anims")
+
+
+def clip_order(clip: str) -> tuple[int, str]:
+    """Gameplay clips first, then menu poses, then clips for other skeletons."""
+    top = clip_label(clip).split("/", 1)[0]
+    return (_CLIP_ORDER.index(top) if top in _CLIP_ORDER else len(_CLIP_ORDER), clip)
 
 
 @dataclass(frozen=True)

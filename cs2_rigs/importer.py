@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import math
+import os
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -11,6 +12,7 @@ from mathutils import Matrix
 
 from . import eyes
 from .core import catalog as catalog_mod
+from .core import clipdata
 from .core import glb as glb_mod
 from .core.catalog import Agent, Weapon
 from .session import Session
@@ -18,6 +20,7 @@ from .session import Session
 AGENT_KEY_PROP = "cs2rig_agent"
 WEAPON_KEY_PROP = "cs2rig_weapon"
 CLIP_KEY_PROP = "cs2rig_clip"
+COMPOSED_PROP = "cs2rig_composed"  # an additive clip shown over the bind pose
 WEAPON_BONE = "wpn"
 WEAPON_ROOT_BONE = "weapon"  # the root bone of weapon models
 GAME_FPS = 30
@@ -242,23 +245,21 @@ def find_agent_armature(context: bpy.types.Context) -> bpy.types.Object | None:
     return agents[0] if len(agents) == 1 else None
 
 
-def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.Object, clip: str) -> bpy.types.Action:
-    """Convert one game clip for this agent and make it the armature's action."""
+def import_clip_action(context: bpy.types.Context, rig_glb: Path, clip_glb: Path, clip: str, work_dir: Path | None = None) -> bpy.types.Action:
+    """Put a converted clip onto an agent's skeleton file, import it and keep only the action.
+
+    The clip's bone tracks are copied into the agent's own export first, so Blender
+    builds the action against the same rest pose as the agent in the scene.
+    """
     label = catalog_mod.clip_label(clip)
-    # Reuse a clip already loaded for this agent. Names are not reliable for this:
-    # two agents with the same clip get "name" and "name.001".
-    for existing in bpy.data.actions:
-        if existing.get(CLIP_KEY_PROP) == clip and existing.get(AGENT_KEY_PROP) == armature[AGENT_KEY_PROP]:
-            _assign_action(armature, existing)
-            _fit_frame_range(context, existing)
-            return existing
-
-    agent_key = armature[AGENT_KEY_PROP]
-    agent = session.agent(agent_key)
-    glb = session.export_model(agent.model_path, session.cache.clip_dir(agent.key, clip), [clip], materials=False)
-
-    actions_before = set(bpy.data.actions)
-    objects = _import_glb(context, glb)
+    grafted = (work_dir or rig_glb.parent) / f"clip-{os.getpid()}.glb"
+    try:
+        if not glb_mod.graft_animation(rig_glb, clip_glb, grafted, label):
+            raise RuntimeError(f"The converter wrote no animation for '{label}'.")
+        actions_before = set(bpy.data.actions)
+        objects = _import_glb(context, grafted)
+    finally:
+        grafted.unlink(missing_ok=True)
     new_actions = [a for a in bpy.data.actions if a not in actions_before]
     meshes = {obj.data for obj in objects if obj.type == "MESH"}
     armature_datas = {obj.data for obj in objects if obj.type == "ARMATURE"}
@@ -272,14 +273,37 @@ def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.
             bpy.data.armatures.remove(data)
     if not new_actions:
         raise RuntimeError(f"The converter wrote no animation for '{label}'.")
-
     action = max(new_actions, key=lambda a: a.frame_range[1] - a.frame_range[0])
     for other in new_actions:
         if other is not action:
             bpy.data.actions.remove(other)
     action.name = label
-    action[AGENT_KEY_PROP] = agent_key
     action[CLIP_KEY_PROP] = clip
+    return action
+
+
+def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.Object, clip: str) -> bpy.types.Action:
+    """Convert one game clip for this agent and make it the armature's action."""
+    label = catalog_mod.clip_label(clip)
+    # Reuse a clip already loaded for this agent. Names are not reliable for this:
+    # two agents with the same clip get "name" and "name.001".
+    for existing in bpy.data.actions:
+        if existing.get(CLIP_KEY_PROP) == clip and existing.get(AGENT_KEY_PROP) == armature[AGENT_KEY_PROP]:
+            _assign_action(armature, existing)
+            _fit_frame_range(context, existing)
+            return existing
+
+    info = session.clip_info(clip)
+    if info.get("skeleton") != clipdata.WORLDMODEL:
+        skeleton = info.get("skeleton_path", "").rsplit("/", 1)[-1] or "another skeleton"
+        raise RuntimeError(f"'{label}' is made for {skeleton}, not the agent skeleton, so it cannot play on an agent.")
+    agent_key = armature[AGENT_KEY_PROP]
+    agent = session.agent(agent_key)
+    clip_glb, composed = session.export_clip(clip)
+    action = import_clip_action(context, session.rig_export(agent), clip_glb, clip)
+    action[AGENT_KEY_PROP] = agent_key
+    if composed:
+        action[COMPOSED_PROP] = True
     action.use_fake_user = True
     _assign_action(armature, action)
 

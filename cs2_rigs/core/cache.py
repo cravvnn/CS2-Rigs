@@ -61,6 +61,20 @@ class Cache:
         digest = hashlib.sha1(clip.encode("utf-8")).hexdigest()[:16]
         return self.version_dir / "clips" / model_key.replace("/", "__") / digest
 
+    def clip_export_dir(self, clip: str) -> Path:
+        """Where one clip, converted on its own skeleton, is kept for every agent."""
+        digest = hashlib.sha1(clip.encode("utf-8")).hexdigest()[:16]
+        return self.version_dir / "clip_exports" / digest
+
+    def clip_census_file(self) -> Path:
+        return self.version_dir / "clip_census.json"
+
+    def clip_status_file(self) -> Path:
+        return self.version_dir / "clip_status.json"
+
+    def clip_preview_dir(self) -> Path:
+        return self.version_dir / "clip_previews"
+
     def texture_dir(self, path: str) -> Path:
         digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
         return self.version_dir / "textures" / digest

@@ -219,6 +219,21 @@ def test_clips_are_matched_to_the_held_weapon():
     assert catalog.clip_fits(run, awp) and not catalog.clip_fits(run, knife)
     assert catalog.clip_fits("world/shared/flashed/flashed", knife)
     assert catalog.clip_fits(run, None)
+    taser = catalog.Weapon("taser", "weapons/models/taser/weapon_taser.vmdl_c", "other")
+    assert catalog.clip_family(taser) == "pistol"
+
+
+def test_clip_list_puts_the_held_weapons_own_clips_first():
+    world = "animation/anims/world/"
+    clips = [world + "rifle/_default_rifle/draw_rifle", world + "rifle/_default_rifle/run_n_rifle",
+             world + "rifle/rifle_ak/draw_ak", world + "rifle/rifle_awp/draw_awp", world + "shared/flashed",
+             world + "knife/_default_knife/idle_knife", "animation/anims/viewmodel/rifle/draw"]
+    ak = catalog.Weapon("ak47", "weapons/models/ak47/weapon_rif_ak47.vmdl_c", "rif")
+    assert catalog.clips_for_weapon(clips, ak) == [
+        world + "rifle/rifle_ak/draw_ak", world + "rifle/_default_rifle/run_n_rifle", world + "shared/flashed"]
+    assert catalog.clips_for_weapon(clips, None) == clips
+    ordered = sorted(["animation/anims/viewmodel/a", "animation/anims/ui_anims/b", "animation/anims/world/c"], key=catalog.clip_order)
+    assert ordered == ["animation/anims/world/c", "animation/anims/ui_anims/b", "animation/anims/viewmodel/a"]
 
 
 def test_maps_list_playable_maps_first(tmp_path):

@@ -78,3 +78,132 @@ def node_world_matrix(data: dict, name: str) -> Matrix4:
         matrix = multiply(local_matrix(nodes[index]), matrix)
         index = parent.get(index)
     return matrix
+
+
+_COMPONENTS = {"SCALAR": 1, "VEC2": 2, "VEC3": 3, "VEC4": 4, "MAT4": 16}
+_FLOAT = 5126
+
+
+def read_glb(path: Path) -> tuple[dict, bytes]:
+    """The JSON and binary chunks of a .glb file."""
+    data = Path(path).read_bytes()
+    magic, _version, _length = struct.unpack_from("<4sII", data, 0)
+    if magic != b"glTF":
+        raise ValueError(f"{Path(path).name} is not a .glb file.")
+    offset, document, binary = 12, None, b""
+    while offset + 8 <= len(data):
+        chunk_length, chunk_type = struct.unpack_from("<I4s", data, offset)
+        chunk = data[offset + 8: offset + 8 + chunk_length]
+        if chunk_type == b"JSON":
+            document = json.loads(chunk)
+        elif chunk_type == b"BIN\x00":
+            binary = chunk
+        offset += 8 + chunk_length
+    if document is None:
+        raise ValueError(f"{Path(path).name} has no JSON chunk.")
+    return document, binary
+
+
+def write_glb(path: Path, document: dict, binary: bytes) -> None:
+    text = json.dumps(document, separators=(",", ":")).encode("utf-8")
+    text += b" " * (-len(text) % 4)
+    binary += b"\x00" * (-len(binary) % 4)
+    chunks = struct.pack("<I4s", len(text), b"JSON") + text
+    if binary:
+        chunks += struct.pack("<I4s", len(binary), b"BIN\x00") + binary
+    Path(path).write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
+
+
+def read_floats(document: dict, binary: bytes, accessor_index: int) -> list[tuple[float, ...]]:
+    """One float accessor as a list of tuples, one per element."""
+    accessor = document["accessors"][accessor_index]
+    if accessor.get("componentType") != _FLOAT:
+        raise ValueError("only float accessors are read")
+    width = _COMPONENTS[accessor["type"]]
+    view = document["bufferViews"][accessor["bufferView"]]
+    start = view.get("byteOffset", 0) + accessor.get("byteOffset", 0)
+    stride = view.get("byteStride") or 4 * width
+    return [struct.unpack_from(f"<{width}f", binary, start + i * stride) for i in range(accessor["count"])]
+
+
+def continuous_rotations(keys: list[tuple[float, ...]]) -> list[tuple[float, ...]]:
+    """Flip quaternions that land on the far side of the previous key.
+
+    q and -q are the same rotation, but interpolating between keys of opposite sign
+    spins the long way round.
+    """
+    result = []
+    for key in keys:
+        if result and sum(a * b for a, b in zip(result[-1], key)) < 0:
+            key = tuple(-v for v in key)
+        result.append(key)
+    return result
+
+
+def animation_names(document: dict) -> list[str]:
+    return [animation.get("name", "") for animation in document.get("animations", [])]
+
+
+def graft_animation(rig: Path, clip: Path, out: Path, name: str) -> int:
+    """Write `out`: the rig .glb with its animations replaced by the clip's, matched by bone name.
+
+    Animation channels hold each bone's own translation, rotation and scale, so they
+    mean the same on any model built on the clip's skeleton. Bones the rig lacks
+    (attachment helpers, a weapon's skeleton) are left out. Returns the channel count.
+    """
+    document, binary = read_glb(rig)
+    clip_document, clip_binary = read_glb(clip)
+    nodes = {}
+    for index, node in enumerate(document.get("nodes", [])):
+        nodes.setdefault(node.get("name", ""), index)
+    clip_nodes = clip_document.get("nodes", [])
+    data = bytearray(binary)
+    data += b"\x00" * (-len(data) % 4)
+    accessors = document.setdefault("accessors", [])
+    views = document.setdefault("bufferViews", [])
+    copied: dict[tuple[int, bool], int] = {}
+
+    def copy(accessor_index: int, rotation: bool) -> int:
+        if (accessor_index, rotation) in copied:
+            return copied[(accessor_index, rotation)]
+        source = clip_document["accessors"][accessor_index]
+        values = read_floats(clip_document, clip_binary, accessor_index)
+        if rotation:
+            values = continuous_rotations(values)
+        width = _COMPONENTS[source["type"]]
+        packed = struct.pack(f"<{len(values) * width}f", *(v for value in values for v in value))
+        views.append({"buffer": 0, "byteOffset": len(data), "byteLength": len(packed)})
+        data.extend(packed)
+        accessor = {"bufferView": len(views) - 1, "componentType": _FLOAT, "count": len(values), "type": source["type"]}
+        if "min" in source and "max" in source and not rotation:
+            accessor["min"], accessor["max"] = source["min"], source["max"]
+        accessors.append(accessor)
+        copied[(accessor_index, rotation)] = len(accessors) - 1
+        return copied[(accessor_index, rotation)]
+
+    animations = []
+    for animation in clip_document.get("animations", []):
+        channels, samplers = [], []
+        for channel in animation.get("channels", []):
+            target = channel.get("target", {})
+            node_name = clip_nodes[target["node"]].get("name", "") if "node" in target else ""
+            if node_name not in nodes:
+                continue
+            sampler = animation["samplers"][channel["sampler"]]
+            rotation = target.get("path") == "rotation"
+            samplers.append({
+                "input": copy(sampler["input"], False),
+                "output": copy(sampler["output"], rotation),
+                "interpolation": sampler.get("interpolation", "LINEAR"),
+            })
+            channels.append({"sampler": len(samplers) - 1, "target": {"node": nodes[node_name], "path": target["path"]}})
+        if channels:
+            animations.append({"name": name, "channels": channels, "samplers": samplers})
+    if len(animations) > 1:  # one clip makes one action; keep the longest
+        animations = [max(animations, key=lambda a: len(a["channels"]))]
+    document["animations"] = animations
+    if not document.get("buffers"):
+        document["buffers"] = [{"byteLength": 0}]
+    document["buffers"][0]["byteLength"] = len(data)
+    write_glb(out, document, bytes(data))
+    return sum(len(a["channels"]) for a in animations)

@@ -12,7 +12,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, eyes, gloves, importer, maps, paint, rig, session
+from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session
 from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
@@ -32,6 +32,7 @@ _paintable: set[str] = set()  # kits whose recipe is in the game files
 _skin_items: dict[str, list[tuple[str, str, str]]] = {}  # per weapon key
 _glove_items: list[tuple[str, str, str]] = []
 _map_job: maps.BuildJob | None = None
+_preview_job: clip_previews.PreviewJob | None = None
 
 _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
 
@@ -129,9 +130,9 @@ def _fill_clips(context: bpy.types.Context) -> None:
     weapon = _held_weapon(importer.find_agent_armature(context)) if wm.cs2rig_match_clips else None
     clips = wm.cs2rig_clips
     clips.clear()
-    for label in _clip_labels:
-        if catalog_mod.clip_fits(label, weapon):
-            clips.add().name = label
+    paths = [catalog_mod.CLIP_PREFIX + label for label in _clip_labels]
+    for path in catalog_mod.clips_for_weapon(paths, weapon):
+        clips.add().name = catalog_mod.clip_label(path)
 
 
 class CS2RIG_Preferences(bpy.types.AddonPreferences):
@@ -258,9 +259,7 @@ class CS2RIG_OT_refresh(bpy.types.Operator):
         _map_items[:] = [
             (m.name, f"{m.name}  (backdrop)" if m.is_backdrop else m.name, m.package) for m in _maps.values()
         ]
-        _clip_labels[:] = [
-            catalog_mod.clip_label(clip) for clip in data.get("clips", []) if clip.startswith(catalog_mod.WORLD_CLIP_PREFIX)
-        ]
+        _clip_labels[:] = [catalog_mod.clip_label(clip) for clip in sorted(data.get("clips", []), key=catalog_mod.clip_order)]
         _kits.clear()
         _kits.update({kit.name: kit for kit in current.skins()})
         _paintable.clear()
@@ -330,9 +329,11 @@ class CS2RIG_OT_load_clip(_AgentOperator):
             return {"CANCELLED"}
         armature = importer.find_agent_armature(context)
         with importer.working_on(context, armature):
-            importer.load_clip(context, session.get(), armature, catalog_mod.CLIP_PREFIX + label)
+            action = importer.load_clip(context, session.get(), armature, catalog_mod.CLIP_PREFIX + label)
         weapon = _held_weapon(armature)
-        if catalog_mod.clip_fits(label, weapon):
+        if action.get(importer.COMPOSED_PROP):
+            self.report({"WARNING"}, f"Loaded {label}. It is additive: the game plays it on top of another clip, so here it is shown over the rest pose.")
+        elif catalog_mod.clip_fits(label, weapon) or not catalog_mod.family_of_clip(label):
             self.report({"INFO"}, f"Loaded {label}.")
         else:
             # The weapon bone sits where this clip holds its own kind of weapon.
@@ -342,6 +343,70 @@ class CS2RIG_OT_load_clip(_AgentOperator):
                 f"The {weapon.label} will not sit in the hands; use a {catalog_mod.clip_family(weapon)} clip.",
             )
         return {"FINISHED"}
+
+
+class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
+    bl_idname = "cs2rig.build_clip_previews"
+    bl_label = "Build Clip Previews"
+    bl_description = (
+        "Load every clip made for agents once, in the background: check that it plays and save a small "
+        "stick-figure preview for each. Takes about ten minutes the first time"
+    )
+    bl_options = {"REGISTER"}
+
+    _timer = None
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_agent_items) and (_preview_job is None or not _preview_job.running)
+
+    def _start(self, context) -> clip_previews.PreviewJob:
+        global _preview_job
+        current = session.get()
+        armature = importer.find_agent_armature(context)
+        agent = current.agent(armature[importer.AGENT_KEY_PROP] if armature else _agent_items[0][0])
+        _preview_job = clip_previews.PreviewJob(current, agent)
+        log_mod.logger.info("building clip previews on %s", agent.key)
+        return _preview_job
+
+    def _finish(self, job) -> set[str]:
+        if job.error:
+            log_mod.logger.error("building clip previews failed: %s", job.error)
+            self.report({"ERROR"}, job.error)
+            return {"CANCELLED"}
+        log_mod.logger.info("built clip previews: %d clips checked", job.done)
+        self.report({"INFO"}, f"Checked {job.done} clips and saved their previews.")
+        return {"FINISHED"}
+
+    @_reports_errors
+    def execute(self, context):
+        # Used by scripts and background runs: wait for the job.
+        job = self._start(context)
+        while job.running:
+            time.sleep(1.0)
+        return self._finish(job)
+
+    def invoke(self, context, event):
+        try:
+            self._start(context)
+        except RuntimeError as exc:
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        self._timer = context.window_manager.event_timer_add(1.0, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        self.report({"INFO"}, "Building clip previews in the background. Blender stays usable.")
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        if event.type != "TIMER" or _preview_job is None:
+            return {"PASS_THROUGH"}
+        for area in context.screen.areas if context.screen else ():
+            if area.type == "VIEW_3D":
+                area.tag_redraw()
+        if _preview_job.running:
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        return self._finish(_preview_job)
 
 
 class CS2RIG_OT_attach_weapon(_AgentOperator):
@@ -683,6 +748,10 @@ class CS2RIG_PT_main(bpy.types.Panel):
         row = box.row(align=True)
         row.operator("cs2rig.load_clip", icon="PLAY")
         row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
+        if _preview_job is not None and _preview_job.running:
+            box.label(text=_preview_job.progress, icon="TIME")
+        else:
+            box.operator("cs2rig.build_clip_previews", icon="ARMATURE_DATA")
 
         box = layout.box()
         box.label(text="Controls")
@@ -727,6 +796,7 @@ _classes = (
     CS2RIG_OT_import_agent,
     CS2RIG_OT_fix_eyes,
     CS2RIG_OT_load_clip,
+    CS2RIG_OT_build_clip_previews,
     CS2RIG_OT_attach_weapon,
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
@@ -804,5 +874,7 @@ def unregister():
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
+    if _preview_job is not None:
+        _preview_job.cancel()  # stops its background Blender
     session.reset()
     log_mod.close()

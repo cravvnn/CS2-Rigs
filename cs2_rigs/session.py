@@ -9,6 +9,7 @@ from pathlib import Path
 import bpy
 
 from .core import catalog as catalog_mod
+from .core import clipdata
 from .core import download
 from .core import finish as finish_mod
 from .core import gloves as gloves_mod
@@ -38,6 +39,7 @@ class Session:
     _skins: list | None = None
     _finishes: dict | None = None
     _materials: dict = field(default_factory=dict)
+    _clip_info: dict = field(default_factory=dict)
 
     def catalog(self) -> dict:
         if self._catalog is None:
@@ -110,6 +112,42 @@ class Session:
     def export_model(self, model_path: str, out_dir: Path, clips: list[str], materials: bool) -> Path:
         """Convert a model from the main game package, or reuse the cached result."""
         return self.converter.export_model(self.install.main_package, model_path, out_dir, clips, materials)
+
+    def clip_info(self, clip: str) -> dict:
+        """What a clip is: its skeleton, length, and whether it is additive.
+
+        Read from the clip census when one has been built, otherwise from the clip itself.
+        """
+        if clip not in self._clip_info:
+            census = clipdata.load_census(self.cache.clip_census_file())
+            if census and clip in census["clips"]:
+                self._clip_info[clip] = census["clips"][clip]
+            else:
+                lines = self.converter.stream(["-i", str(self.install.main_package), "-f", clip + ".vnmclip_c", "-b", "DATA"], timeout=300)
+                found = dict(clipdata.parse_clip_dump(lines))
+                if clip not in found:
+                    raise SetupError(f"The clip '{catalog_mod.clip_label(clip)}' is not in the game files.")
+                self._clip_info[clip] = found[clip]
+        return self._clip_info[clip]
+
+    def clip_census(self, progress=None) -> dict:
+        """Facts about every clip in the game. Reading them takes about half a minute the first time."""
+        census = clipdata.load_or_build_census(
+            self.converter, self.install.main_package, self.catalog().get("clips", []), self.cache.clip_census_file(), progress
+        )
+        self._clip_info.update(census["clips"])
+        return census
+
+    def rig_export(self, agent: catalog_mod.Agent) -> Path:
+        """The agent without materials, which clips are put onto before Blender imports them."""
+        return self.export_model(agent.model_path, self.cache.clip_dir(agent.key, "rig"), [catalog_mod.BASE_CLIP], materials=False)
+
+    def export_clip(self, clip: str) -> tuple[Path, bool]:
+        """Convert one clip on its own skeleton. Returns the file and whether it was composed
+        over the bind pose (an additive clip the game has no full version of)."""
+        source, compose = clipdata.source_clip(self.clip_info(clip))
+        path = self.converter.export_clip(self.install.main_package, source or clip, self.cache.clip_export_dir(clip), compose)
+        return path, compose
 
 
 _session: Session | None = None

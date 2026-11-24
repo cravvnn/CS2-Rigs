@@ -54,7 +54,7 @@ The game is found through Steam. If it is somewhere unusual, set **Game Folder**
 - **Agents.** All agents with their materials, posed by the game's skeleton.
 - **Weapons.** Every weapon and knife, held on the agent's weapon bone so it follows the clip.
 - **Finishes.** Weapon, knife and glove finishes built the way the game builds them, with **Wear** and **Seed**.
-- **Animation clips.** The game's third-person clips, filtered to the held weapon.
+- **Animation clips.** Every game clip made for agents, gameplay and menu poses, filtered to the held weapon.
 - **Controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
 - **Maps.** Game maps built once into their own file, then linked or copied into your scene.
 
@@ -64,9 +64,18 @@ Press **Refresh**, choose an agent and press **Import Agent**. With the agent se
 search for a clip and press **Load Clip**.
 
 **Hold Weapon** puts the chosen weapon on the agent's weapon bone, so it follows
-the clip. The clip list then shows only clips made for that kind of weapon; a
-rifle clip leaves a knife floating where the rifle would be. Untick **Only Clips
-for the Held Weapon** to see every clip.
+the clip. The clip list then shows only clips made for that kind of weapon: the
+weapon's own clips first (a karambit's own draw), then the default ones it does
+not replace, then the shared deaths, flinches and jumps. A rifle clip leaves a
+knife floating where the rifle would be. Untick **Only Clips for the Held Weapon**
+to see every clip, including the first-person, chicken and egg clips, which are
+made for other skeletons and do not play on an agent.
+
+Some clips only hold the difference from another pose and the game plays them on
+top of one. For those the game's own full version is loaded instead.
+
+**Build Clip Previews** loads every agent clip once in the background, checks it
+and saves a small stick-figure preview of it. It takes about ten minutes.
 
 **Browse Clips** opens every clip in the game by category, including the menu
 poses, with a search field. Point at a clip to see its skeleton play; click it to
@@ -181,6 +190,8 @@ This is an alpha. Not done yet:
 - **Seed placement** does not match the game's.
 - **Render-time effects** such as pearlescence, glitter and iridescence.
 - **Dual Berettas:** the left pistol does not follow the clip.
+- **Weapon parts in clips:** a clip moves the agent and the weapon bone, not the weapon's
+  own parts, so a knife does not spin open in its draw and slides and magazines stay put.
 - **Maps** have no baked lighting and cannot be cropped to an area yet.
 - **Controls:** no torso or hip controls; twist bone weights are estimates.
 - **Third person only;** first-person arms are not set up.

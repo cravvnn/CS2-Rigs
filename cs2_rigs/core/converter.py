@@ -134,6 +134,53 @@ class Converter:
         """Everything the converter can print about one resource, as text."""
         return self._run(["-i", str(package), "-f", path, "-a"], timeout=300)
 
+    def stream(self, args: list[str], timeout: float):
+        """Run the converter and yield its output line by line, for dumps too large to hold."""
+        flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
+        try:
+            process = subprocess.Popen(
+                [str(self.cli), *args],
+                stdout=subprocess.PIPE,
+                stderr=subprocess.DEVNULL,
+                text=True,
+                encoding="utf-8",
+                errors="replace",
+                creationflags=flags,
+            )
+        except OSError as exc:
+            raise ConverterError(f"Could not start the converter: {exc}") from exc
+        started = time.monotonic()
+        try:
+            for line in process.stdout:
+                if time.monotonic() - started > timeout:
+                    raise ConverterError(f"The converter did not finish within {timeout:.0f} s.")
+                yield line
+            if process.wait(timeout=60) != 0:
+                raise ConverterError(f"The converter failed with exit code {process.returncode}.")
+        finally:
+            if process.poll() is None:
+                process.kill()
+            process.stdout.close()
+
+    def export_clip(self, package: Path, clip: str, out_dir: Path, compose_additive: bool = False) -> Path:
+        """Export one animation clip on its own skeleton to .glb.
+
+        A clip exported with a model is found through the model's animation graphs,
+        and clips no graph uses any more come out empty. Exported alone, every clip
+        converts, and its bone tracks are the same as on the model.
+        """
+        options = ["--gltf_export_format", "glb"]
+        if compose_additive:
+            options.append("--gltf_compose_additive")
+        return self._convert(package, clip + ".vnmclip_c", out_dir, ".glb", options)
+
+    def export_clip_folder(self, package: Path, folder: str, out_dir: Path, compose_additive: bool = False) -> None:
+        """Export every clip under a folder in one run, much faster than one run per clip."""
+        args = ["-i", str(package), "-o", str(out_dir), "-d", "-f", folder.rstrip("/") + "/", "-e", "vnmclip_c", "--gltf_export_format", "glb"]
+        if compose_additive:
+            args.append("--gltf_compose_additive")
+        self._run(args, timeout=EXPORT_TIMEOUT)
+
     def dump_folder(self, package: Path, folder: str, extension: str) -> str:
         """The data block of every resource of one type under a folder, as one text."""
         return self._run(["-i", str(package), "-f", folder, "-e", extension, "-b", "DATA"], timeout=600)
