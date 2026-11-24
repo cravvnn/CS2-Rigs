@@ -53,7 +53,7 @@ The game is found through Steam. If it is somewhere unusual, set **Game Folder**
 
 - **Agents.** All agents with their materials, posed by the game's skeleton.
 - **Weapons.** Every weapon and knife, held on the agent's weapon bone so it follows the clip.
-- **Finishes.** Weapon and knife finishes built the way the game builds them, with **Wear** and **Seed**.
+- **Finishes.** Weapon, knife and glove finishes built the way the game builds them, with **Wear** and **Seed**.
 - **Animation clips.** The game's third-person clips, filtered to the held weapon.
 - **Controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
 - **Maps.** Game maps built once into their own file, then linked or copied into your scene.
@@ -98,6 +98,19 @@ not done yet are named when you apply a finish that has them; see [Known issues]
 ![AK-47 with the Bloodsport finish](docs/finish.png)
 
 ![AK-47 Jungle Spray, battle-scarred](docs/finish-worn.png)
+
+### Gloves
+
+With an agent selected, choose **Gloves** in the Agent box (for example Sport Gloves |
+Vice or Driver Gloves | King Snake), set **Wear** and **Seed** and press **Apply
+Gloves**. The agent's default gloves are hidden and the glove model goes on its
+skeleton, so the hands follow every clip. **Remove Gloves** brings the defaults back.
+The finish is built once per hand, so left and right differ the way they do in the game.
+
+The game paints gloves with a different shader from weapons, and its exact maths is
+not known. Gloves keep the game's colours, patterns, materials and wear textures but
+are an approximation: expect them close to the game, not the same. All 94 glove
+finishes can be applied.
 
 ### Controls
 
@@ -161,7 +174,8 @@ passes on Valve's assets with it; share renders, or files with linked maps and n
 
 This is an alpha. Not done yet:
 
-- **Glove finishes** (a different game shader) and **stickers**.
+- **Stickers.**
+- **Glove finishes** are approximated: wear and the layered materials are close to the game but not exact, and the detail normal maps are left out.
 - **Finish parts:** overlays, halftone and masked spray, the case-hardening pass and
   patina ageing. A finish that uses them is applied without them and the panel says which.
 - **Seed placement** does not match the game's.
@@ -197,6 +211,8 @@ numpy for the compositor tests):
 `tools/rig_check.py`, `tools/weapon_check.py`, `tools/skin_check.py` and
 `tools/map_check.py` run the same way and check the controls, weapon attachment,
 finishes and maps. `tools/reopen_check.py` saves and reopens a file with a finish on.
+`tools/glove_check.py` puts glove finishes on a CT and a T agent and renders each hand, and
+`tools/glove_sweep.py` reads every glove finish and reports which apply.
 `tools/panel_check.py` draws the panel without a window, to
 catch a wrong icon, property or operator name. `tools/sweep.py` imports every
 agent and holds every weapon, and `tools/finish_sweep.py` reads every finish

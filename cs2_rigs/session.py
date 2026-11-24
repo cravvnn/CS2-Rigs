@@ -11,6 +11,7 @@ import bpy
 from .core import catalog as catalog_mod
 from .core import download
 from .core import finish as finish_mod
+from .core import gloves as gloves_mod
 from .core import skins as skins_mod
 from .core.cache import Cache, default_cache_root
 from .core.converter import CLI_NAME, Converter, find_cli
@@ -58,6 +59,8 @@ class Session:
         return self._finishes
 
     def can_apply(self, kit: skins_mod.PaintKit) -> bool:
+        if gloves_mod.is_glove_kit(kit):
+            return gloves_mod.recipe_for(kit, self.finishes()["recipes"]) is not None
         return finish_mod.recipe_path(kit.name, kit.fields.get("composite_material_path", "")) in self.finishes()["recipes"]
 
     def material(self, path: str) -> dict:
@@ -81,6 +84,16 @@ class Session:
             return finish_mod.resolve(self.finishes(), recipe, self.material(inputs), target, seed, wear)
         except KeyError as exc:
             raise SetupError(f"{kit.label} cannot be shown yet: {exc}") from exc
+
+    def glove_values(self, kit: skins_mod.PaintKit, left: bool, seed: int, wear: float) -> dict:
+        """The shader values for a glove finish on the left or the right glove."""
+        recipe = gloves_mod.recipe_for(kit, self.finishes()["recipes"])
+        if recipe is None:
+            raise SetupError(f"{gloves_mod.label(kit)} cannot be shown yet: the game has no recipe for it.")
+        try:
+            return finish_mod.resolve(self.finishes(), recipe, {}, {}, seed, wear, gloves_mod.attributes(left))
+        except KeyError as exc:
+            raise SetupError(f"{gloves_mod.label(kit)} cannot be shown yet: {exc}") from exc
 
     def texture(self, path: str) -> Path:
         """Convert one texture named by a material (a '.vtex' path); returns the image file."""

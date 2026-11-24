@@ -12,10 +12,11 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, eyes, importer, maps, paint, rig, session
+from . import clip_browser, eyes, gloves, importer, maps, paint, rig, session
 from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
+from .core import gloves as gloves_mod
 from .core import skins as skins_mod
 from .core.download import CLI_VERSION
 
@@ -29,6 +30,7 @@ _clip_labels: list[str] = []
 _kits: dict[str, skins_mod.PaintKit] = {}
 _paintable: set[str] = set()  # kits whose recipe is in the game files
 _skin_items: dict[str, list[tuple[str, str, str]]] = {}  # per weapon key
+_glove_items: list[tuple[str, str, str]] = []
 _map_job: maps.BuildJob | None = None
 
 _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
@@ -64,7 +66,7 @@ def _op_name(operator) -> str:
 def _selection(context, operator) -> str:
     """What was chosen in the panel for this step, for the log."""
     wm = context.window_manager
-    names = ("map",) if "map" in operator else ("agent", "weapon", "skin", "clip")
+    names = ("map",) if "map" in operator else ("agent", "weapon", "skin", "glove", "clip")
     chosen = []
     for name in names:
         value = getattr(wm, f"cs2rig_{name}", "")
@@ -115,6 +117,10 @@ def _skin_enum(self, context):
             (kit.name, kit.label, f"{kit.rarity or 'finish'} ({kit.name})") for kit in offered if kit.name in _paintable
         ]
     return _skin_items[key] or [("NONE", "No finishes", "This weapon has no finish that can be shown")]
+
+
+def _glove_enum(self, context):
+    return _glove_items or [("NONE", "No gloves", "Press Refresh to read the glove finishes from the game")]
 
 
 def _fill_clips(context: bpy.types.Context) -> None:
@@ -260,6 +266,7 @@ class CS2RIG_OT_refresh(bpy.types.Operator):
         _paintable.clear()
         _paintable.update(kit.name for kit in _kits.values() if current.can_apply(kit))
         _skin_items.clear()
+        _glove_items[:] = [(kit.name, gloves_mod.label(kit), f"{kit.rarity or 'finish'} ({kit.name})") for kit in gloves_mod.glove_kits(_kits.values()) if kit.name in _paintable]
         _fill_clips(context)
         log_mod.logger.info("game files %s, %d finishes can be applied", current.cache.version_dir.name, len(_paintable))
         self.report({"INFO"}, f"Found {len(_agent_items)} agents, {len(_clip_labels)} clips and {len(_maps)} maps.")
@@ -412,6 +419,39 @@ class CS2RIG_OT_remove_skin(_AgentOperator):
 
     def execute(self, context):
         paint.remove_skin(importer.find_agent_armature(context))
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_apply_gloves(_AgentOperator):
+    bl_idname = "cs2rig.apply_gloves"
+    bl_label = "Apply Gloves"
+    bl_description = "Put the chosen glove finish on the agent's hands, with the wear and pattern seed set below. Takes a few seconds"
+
+    @_reports_errors
+    def execute(self, context):
+        wm = context.window_manager
+        kit = _kits.get(wm.cs2rig_glove)
+        if kit is None:
+            self.report({"ERROR"}, "Choose gloves first.")
+            return {"CANCELLED"}
+        gloves.apply_gloves(context, session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
+        log_mod.logger.info("gloves %s wear %.2f seed %d", kit.name, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
+        self.report({"INFO"}, f"Applied {gloves_mod.label(kit)}.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_remove_gloves(_AgentOperator):
+    bl_idname = "cs2rig.remove_gloves"
+    bl_label = "Remove Gloves"
+    bl_description = "Give the agent its default gloves back"
+
+    @classmethod
+    def poll(cls, context):
+        armature = importer.find_agent_armature(context)
+        return armature is not None and bool(gloves.worn_gloves(armature))
+
+    def execute(self, context):
+        gloves.remove_gloves(importer.find_agent_armature(context))
         return {"FINISHED"}
 
 
@@ -613,6 +653,13 @@ class CS2RIG_PT_main(bpy.types.Panel):
             box.label(text="Select an imported agent.", icon="INFO")
         else:
             box.label(text=f"Acting on {armature.name.removesuffix('.skeleton')}", icon="ARMATURE_DATA")
+            box.prop(wm, "cs2rig_glove", text="Gloves")
+            row = box.row(align=True)
+            row.prop(wm, "cs2rig_glove_wear", slider=True)
+            row.prop(wm, "cs2rig_glove_seed")
+            row = box.row(align=True)
+            row.operator("cs2rig.apply_gloves", icon="BRUSH_DATA")
+            row.operator("cs2rig.remove_gloves", text="", icon="X")
 
         box = layout.box()
         box.label(text="Weapon")
@@ -684,6 +731,8 @@ _classes = (
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
     CS2RIG_OT_remove_skin,
+    CS2RIG_OT_apply_gloves,
+    CS2RIG_OT_remove_gloves,
     CS2RIG_OT_build_rig,
     CS2RIG_OT_remove_rig,
     CS2RIG_OT_snap_limb,
@@ -717,6 +766,21 @@ def register():
         max=1000,
         default=0,
     )
+    wm.cs2rig_glove = EnumProperty(name="Gloves", items=_glove_enum)
+    wm.cs2rig_glove_wear = FloatProperty(
+        name="Wear",
+        description="How worn the gloves are, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
+        min=0.0,
+        max=1.0,
+        default=0.0,
+    )
+    wm.cs2rig_glove_seed = IntProperty(
+        name="Seed",
+        description="Varies where the pattern and wear fall. The placement for a seed is not the one the game gives it",
+        min=0,
+        max=1000,
+        default=0,
+    )
     wm.cs2rig_map = EnumProperty(name="Map", items=lambda self, context: _map_items or _PRESS_REFRESH)
     wm.cs2rig_map_link = BoolProperty(
         name="Link",
@@ -736,7 +800,7 @@ def register():
 def unregister():
     clip_browser.unregister()
     wm = bpy.types.WindowManager
-    for name in ("cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
+    for name in ("cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

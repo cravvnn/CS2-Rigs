@@ -15,12 +15,16 @@ from pathlib import Path
 
 from .converter import Converter
 
-LIBRARY_VERSION = 1
+LIBRARY_VERSION = 2
 PAINT_MATERIALS = "materials/models/weapons/customization/paints/vmats/"
 TEMPLATE_MATERIALS = "workshop/paintkits/templates/"
 RECIPES = "weapons/paints/"
+GLOVE_RECIPES = "gloves/paints/"
+GLOVE_MATERIALS = ("gloves/paints/", "gloves/textiles/", "items/assets/paintkits/volatile_02/")
 LEGACY_RECIPE = "weapons/paints/legacy/{name}.vcompmat"
 SEED_VARIABLE = "g_nRandomSeed"
+ALT_SEED_VARIABLE = "g_nRandomSeedAlt"  # used by materials that carry the target's 'seed_offset' attribute
+ALT_SEED_STEP = 1000003
 WEAR_VARIABLE = "g_flWearAmount"
 
 _TOKEN = re.compile(
@@ -142,6 +146,8 @@ def _variable(entry: dict):
         return entry.get("m_nValueIntX", 0), None, None
     if kind.endswith("RESOURCE_TEXTURE"):
         return entry.get("m_strTextureRuntimeResourcePath", ""), None, None
+    if kind.endswith("RESOURCE_MATERIAL"):
+        return entry.get("m_strResourceMaterial", ""), None, None
     if kind.endswith("COLOR4"):
         return tuple(channel / 255.0 for channel in entry.get("m_cValueColor4", (255, 255, 255))), None, None
     if "FLOAT" in kind:
@@ -207,18 +213,22 @@ def recipe(data: dict) -> dict:
                     entry["material"] = container.get("m_strSpecificContainerMaterial", "")
                 elif source == "LOOSE_VARIABLES":
                     entry["variables"] = {v["m_strName"]: list(_variable(v)) for v in container.get("m_vecLooseVariables") or () if "m_strName" in v}
+                elif source == "VARIABLE_FROM_TARGET_ATTR":
+                    entry["attribute"] = container.get("m_strAttrNameForVar", "")
                 out["containers"][container.get("m_strAlias", "")] = entry
             out["steps"] += [_mutator(step) for step in procedure.get("m_vecPropertyMutators") or ()]
     return out
 
 
 def build_library(converter: Converter, package: Path) -> dict:
-    """Every weapon paint material and recipe in the game, read in three converter runs."""
+    """Every weapon and glove paint material and recipe in the game, read in a few converter runs."""
     materials = {}
-    for folder in (PAINT_MATERIALS, TEMPLATE_MATERIALS):
+    for folder in (PAINT_MATERIALS, TEMPLATE_MATERIALS, *GLOVE_MATERIALS):
         for path, data in split_dump(converter.dump_folder(package, folder, "vmat_c")).items():
             materials[path] = material_values(data)
-    recipes = {path: recipe(data) for path, data in split_dump(converter.dump_folder(package, RECIPES, "vcompmat_c")).items()}
+    recipes = {}
+    for folder in (RECIPES, GLOVE_RECIPES):
+        recipes.update({path: recipe(data) for path, data in split_dump(converter.dump_folder(package, folder, "vcompmat_c")).items()})
     return {"version": LIBRARY_VERSION, "materials": materials, "recipes": recipes}
 
 
@@ -323,13 +333,17 @@ def _roll(step: dict, variables: dict, containers: dict, seed: int) -> None:
             containers[alias][name] = rng.uniform(low, high)
 
 
-def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict, seed: int = 0, wear: float = 0.0) -> dict:
-    """The shader values for one finish on one weapon.
+def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict, seed: int = 0, wear: float = 0.0, attributes: dict | None = None) -> dict:
+    """The shader values for one finish on one weapon, or on one glove.
 
     `weapon_inputs` and `weapon_material` are `material_values` of the weapon's
     composite-inputs material and of its body material. The result has the
     values the colour texture is built from, plus `g_tNormal` when the finish
     replaces the weapon's normal map.
+
+    A glove passes the attributes of its material, `left` and `seed_offset`, as
+    `attributes`. Its result keeps the finish's own normal map, and the paint
+    values include every texture and number the glove shader needs.
     """
     merged = _merged(library, path)
     containers = {}
@@ -344,13 +358,20 @@ def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict
             containers[alias] = dict(weapon_inputs)
         elif entry["source"] == "TARGET_MATERIAL":
             containers[alias] = dict(weapon_material)
+        elif entry["source"] == "VARIABLE_FROM_TARGET_ATTR" and attributes and entry.get("attribute") in attributes:
+            containers[alias] = {entry["attribute"]: attributes[entry["attribute"]]}
         else:
             containers[alias] = {}
     for values in containers.values():
         if SEED_VARIABLE in values:
             values[SEED_VARIABLE] = seed
+        if ALT_SEED_VARIABLE in values:
+            values[ALT_SEED_VARIABLE] = seed + ALT_SEED_STEP
         if WEAR_VARIABLE in values:
             values[WEAR_VARIABLE] = wear
+        named = values.pop("m_strResourceMaterial", None)
+        if named:  # a loose variable that names a material stands for that material's values
+            values.update(library["materials"].get(named.removesuffix("_c"), {}))
 
     def run(steps, state):
         for step in steps:
@@ -360,7 +381,8 @@ def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict
             if kind == "CONDITIONAL_MUTATORS":
                 run(step["steps"], state)
             elif kind == "RANDOM_ROLL_INPUT_VARIABLES":
-                _roll(step, variables, containers, seed)
+                alias, _, name = step.get("seed", "").partition(".")
+                _roll(step, variables, containers, containers.get(alias, {}).get(name, seed))
             elif state is None:
                 continue
             elif kind == "COPY_MATCHING_KEYS":
@@ -370,7 +392,11 @@ def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict
             elif kind == "COPY_PROPERTY":
                 source = containers.get(step["from"], {})
                 if step["name"] in source:
-                    state[step["to"]] = source[step["name"]]
+                    target, _, name = step["to"].rpartition(".")
+                    if target in containers:  # 'instance_params.g_fPatternTexCoordOffset' sets a value inside another container
+                        containers[target][name] = source[step["name"]]
+                    else:
+                        state[step["to"]] = source[step["name"]]
             elif kind == "SET_VALUE":
                 state[step["to"]] = step["value"]
 
@@ -392,10 +418,10 @@ def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict
         raise KeyError(f"{path} has no colour recipe")
     # The surface texture has a recipe of its own, which is where some switches are set.
     for name, value in (surface or {}).items():
-        if name.startswith("F_") and name != "F_ROUGHNESS_MODE":
+        if name.startswith("F_") and name not in ("F_ROUGHNESS_MODE", "F_OUTPUT_MODE"):
             colour[name] = value
     if final.get("g_tNormal"):
         colour["g_tNormal"] = final["g_tNormal"]
-    else:
+    elif attributes is None:
         colour.pop("g_tNormal", None)
     return colour

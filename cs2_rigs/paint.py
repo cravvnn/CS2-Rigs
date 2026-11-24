@@ -185,6 +185,31 @@ def _base_material(material: bpy.types.Material | None) -> bpy.types.Material | 
     return base if isinstance(base, bpy.types.Material) and base != material else None
 
 
+def set_images(material: bpy.types.Material, files: dict) -> None:
+    """Point a material's colour, surface and (when given) normal textures at the finish's images."""
+    tree = material.node_tree
+    shader = _principled(material)
+    colour = _image_node(material, "Base Color")
+    colour.image = _load(files["colour"], colour=True)
+    surface = _image_node(material, "Roughness")
+    if surface is None or surface is colour:
+        # No packed surface texture to swap: wire one in.
+        surface = tree.nodes.new("ShaderNodeTexImage")
+        surface.location = (colour.location.x, colour.location.y - 300)
+        split = tree.nodes.new("ShaderNodeSeparateColor")
+        split.location = (surface.location.x + 300, surface.location.y)
+        for link in colour.inputs["Vector"].links:
+            tree.links.new(link.from_socket, surface.inputs["Vector"])
+        tree.links.new(surface.outputs["Color"], split.inputs["Color"])
+        tree.links.new(split.outputs["Green"], shader.inputs["Roughness"])
+        tree.links.new(split.outputs["Blue"], shader.inputs["Metallic"])
+    surface.image = _load(files["surface"], colour=False)
+    if "normal" in files:
+        normal = _image_node(material, "Normal")
+        if normal is not None:
+            normal.image = _load(files["normal"], colour=False)
+
+
 def worn_skin(armature: bpy.types.Object) -> str:
     """The name of the kit on the held weapon, or ''."""
     return next((obj[SKIN_PROP] for obj in armature.children_recursive if SKIN_PROP in obj.keys()), "")
@@ -238,27 +263,7 @@ def apply_skin(context: bpy.types.Context, session: Session, armature: bpy.types
     # A reference rather than a name: it keeps the stock material in the file when it is saved.
     painted[BASE_MATERIAL_PROP] = base
     slot.material = painted
-    tree = painted.node_tree
-    shader = _principled(painted)
-    colour = _image_node(painted, "Base Color")
-    colour.image = _load(files["colour"], colour=True)
-    surface = _image_node(painted, "Roughness")
-    if surface is None or surface is colour:
-        # No packed surface texture to swap: wire one in.
-        surface = tree.nodes.new("ShaderNodeTexImage")
-        surface.location = (colour.location.x, colour.location.y - 300)
-        split = tree.nodes.new("ShaderNodeSeparateColor")
-        split.location = (surface.location.x + 300, surface.location.y)
-        for link in colour.inputs["Vector"].links:
-            tree.links.new(link.from_socket, surface.inputs["Vector"])
-        tree.links.new(surface.outputs["Color"], split.inputs["Color"])
-        tree.links.new(split.outputs["Green"], shader.inputs["Roughness"])
-        tree.links.new(split.outputs["Blue"], shader.inputs["Metallic"])
-    surface.image = _load(files["surface"], colour=False)
-    if "normal" in files:
-        normal = _image_node(painted, "Normal")
-        if normal is not None:
-            normal.image = _load(files["normal"], colour=False)
+    set_images(painted, files)
 
     _show_only(body, legacy if body is current else current)
     root = next((obj for obj in importer.held_weapon_objects(armature) if importer.WEAPON_KEY_PROP in obj.keys()), body)
