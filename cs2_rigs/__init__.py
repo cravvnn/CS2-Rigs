@@ -12,7 +12,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import importer, maps, paint, rig, session
+from . import clip_browser, importer, maps, paint, rig, session
 from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
@@ -617,7 +617,9 @@ class CS2RIG_PT_main(bpy.types.Panel):
         box.label(text="Animation")
         box.prop_search(wm, "cs2rig_clip", wm, "cs2rig_clips", text="", icon="ACTION")
         box.prop(wm, "cs2rig_match_clips")
-        box.operator("cs2rig.load_clip", icon="PLAY")
+        row = box.row(align=True)
+        row.operator("cs2rig.load_clip", icon="PLAY")
+        row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
 
         box = layout.box()
         box.label(text="Controls")
@@ -678,6 +680,7 @@ _classes = (
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    clip_browser.register()
     _start_log()
     wm = bpy.types.WindowManager
     wm.cs2rig_agent = EnumProperty(name="Agent", items=lambda self, context: _agent_items or _PRESS_REFRESH)
@@ -714,6 +717,7 @@ def register():
 
 
 def unregister():
+    clip_browser.unregister()
     wm = bpy.types.WindowManager
     for name in ("cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)

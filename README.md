@@ -68,6 +68,11 @@ the clip. The clip list then shows only clips made for that kind of weapon; a
 rifle clip leaves a knife floating where the rifle would be. Untick **Only Clips
 for the Held Weapon** to see every clip.
 
+**Browse Clips** opens every clip in the game by category, including the menu
+poses, with a search field. Point at a clip to see its skeleton play; click it to
+load it. Clips made for the first-person arms, the chicken and the egg are listed
+greyed out, since they do not fit an agent. Press Esc or right-click to close it.
+
 Importing an agent sets a scene still on Blender's default 24 fps to 30 fps, the
 rate the game clips are authored at.
 
