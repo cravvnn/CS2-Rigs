@@ -149,13 +149,35 @@ def test_hands_are_told_apart_by_their_material_file_names():
 
 
 def test_texture_names_follow_the_shader_a_finish_is_for():
-    older = {"g_tLayerMask": "m", "g_tSurface": "s", "g_tDetail1": "d", "g_tGrunge1": "g", "F_PATTERN": 1, "g_tPattern": "p"}
+    older = {
+        "g_tLayerMask": "m",
+        "g_tSurface": "s",
+        "g_tNormal": "n",
+        "g_tDetail1": "d",
+        "g_tGrunge1": "g",
+        "g_tDetailNormal1": "dn",
+        "g_tDamageNormal1": "xn",
+        "F_PATTERN": 1,
+        "g_tPattern": "p",
+    }
     assert gloves.generation(older) == 1
-    assert gloves.texture_names(older) == ["g_tLayerMask", "g_tSurface", "g_tDetail1", "g_tGrunge1", "g_tPattern"]
+    assert gloves.texture_names(older) == ["g_tLayerMask", "g_tSurface", "g_tNormal", "g_tDetail1", "g_tGrunge1", "g_tDetailNormal1", "g_tDamageNormal1", "g_tPattern"]
+    assert gloves.raw_texture_names(older) == set()
     assert "g_tPattern" not in gloves.texture_names({**older, "F_PATTERN": 0})
-    newer = {"g_tLayerId": "i", "g_tTintId": "t", "g_tSurface2": "s", "g_bId2Pattern": 1, "g_tPattern": "p"}
+    newer = {
+        "g_tLayerId": "i",
+        "g_tTintId": "t",
+        "g_tSurface2": "s",
+        "g_tSurfaceNormal2": "sn",
+        "g_tSubstrateNormal2": "bn",
+        "F_PATTERN": 1,
+        "F_PATTERN_PAINT": 1,
+        "g_tPattern": "p",
+        "g_tPatternProperties": "pp",
+    }
     assert gloves.generation(newer) == 2
-    assert gloves.texture_names(newer) == ["g_tLayerId", "g_tTintId", "g_tSurface2", "g_tPattern"]
+    assert gloves.texture_names(newer) == ["g_tLayerId", "g_tTintId", "g_tSurface2", "g_tSurfaceNormal2", "g_tSubstrateNormal2", "g_tPattern", "g_tPatternProperties"]
+    assert gloves.raw_texture_names(newer) == {"g_tSurfaceNormal2", "g_tSubstrateNormal2"}
 
 
 def flat(value, size=4, channels=4):
@@ -188,9 +210,10 @@ def older_textures():
 def test_each_material_gets_its_own_tint_roughness_and_metalness():
     out = gloves.compose(older_values(), older_textures(), 8, wear=0.0)
     assert out["colour"].shape == (8, 8, 3) and out["roughness"].shape == (8, 8)
+    assert out["normal"].shape == (8, 8, 3) and out["occlusion"].shape == (8, 8)
     left, right = out["colour"][4, 1], out["colour"][4, 6]
-    assert left[0] == pytest.approx(left[1], abs=1e-3)  # grey leather
-    assert right[0] > 0.9 and right[1] < 0.05  # the red tint
+    assert abs(float(left[0] - left[1])) < 0.05  # neutral grey leather (with subtle shader noise tint)
+    assert right[0] > 0.9 and right[1] < 0.2 and right[0] - right[2] > 0.5  # red tint dominates over G and B
     assert out["metalness"][4, 1] == 0.0 and out["metalness"][4, 6] == 1.0
     assert out["roughness"][4, 6] < out["roughness"][4, 1]
 
@@ -214,13 +237,113 @@ def test_the_newer_shader_lays_tint_colours_over_the_surface():
     values = {
         "g_tLayerId": "i",
         "g_tTintId": "t",
-        "g_vId1Color": (0.0, 1.0, 0.0, 1.0),
+        "F_TINT_ID": 1,
+        "F_PATTERN": 0,
+        "g_vId1Color": (1.0, 1.0, 1.0, 0.0),
+        "g_vId2Color": (0.0, 1.0, 0.0, 1.0),
         "g_vSurfaceColorTint1": (1.0, 1.0, 1.0, 0.0),
         "g_vDamageMinMax1": (0.0, 1.0, 0.0, 0.0),
     }
+    layer_id = np.zeros((8, 8, 4), dtype=np.float32)
+    layer_id[..., 0] = 1.0  # red = layer 1 in the Source2 shader
     ids = np.zeros((8, 8, 4), dtype=np.float32)
-    ids[:, 4:, 0] = 32.5 / 255.0  # id 1 on the right half
-    textures = {"g_tLayerId": flat(0.0, 8), "g_tTintId": ids, "g_tSurface1": flat(0.5, 8)}
+    ids[:, 4:, 0] = 32.5 / 255.0  # ceil(32.5/255 * 7) = 1 -> g_vId2Color on the right half
+    textures = {"g_tLayerId": layer_id, "g_tTintId": ids, "g_tSurface1": flat((0.5, 0.5, 0.5, 1.0), 8)}
     out = gloves.compose(values, textures, 8, wear=0.0)
-    assert out["colour"][4, 6][1] > 0.9 and out["colour"][4, 6][0] < 0.05
-    assert out["colour"][4, 1].min() > 0.3  # no id: the plain surface
+    assert out["colour"][4, 6][1] > 0.9 and out["colour"][4, 6][0] < 0.35 and out["colour"][4, 6][2] < 0.35
+    assert abs(float(out["colour"][4, 1][0] - out["colour"][4, 1][1])) < 0.02  # untinted neutral surface on the left
+
+
+def test_flip_fixup_mirrors_patterns_horizontally_in_both_generations():
+    pattern = np.zeros((8, 8, 4), dtype=np.float32)
+    pattern[:, :4, 0] = 1.0  # red on the left half, black on the right
+    pattern[..., 3] = 1.0
+
+    # Generation 1 (bitmap pattern, unmasked)
+    v1 = older_values(F_PATTERN=1, g_nPatternMode=3, g_fPatternTexCoordScale=1.0, g_fPatternTexCoordRotation=0.0)
+    t1 = {**older_textures(), "g_tPattern": pattern}
+    right_1 = gloves.compose({**v1, "g_bFlipFixup": 0}, t1, 8, wear=0.0)["colour"]
+    left_1 = gloves.compose({**v1, "g_bFlipFixup": 1}, t1, 8, wear=0.0)["colour"]
+    assert right_1[4, 1, 0] > 0.5 and right_1[4, 6, 0] < 0.1
+    assert left_1[4, 6, 0] > 0.5 and left_1[4, 1, 0] < 0.1
+
+    # Generation 2 (paint layer pattern)
+    layer_id = np.zeros((8, 8, 4), dtype=np.float32)
+    layer_id[..., 0] = 1.0
+    v2 = {"g_tLayerId": "i", "F_TINT_ID": 0, "F_PATTERN": 1, "F_PATTERN_PAINT": 1, "g_vPatternTexCoordScale": (1.0, 1.0)}
+    t2 = {"g_tLayerId": layer_id, "g_tSurface1": flat((0.5, 0.5, 0.5, 1.0), 8), "g_tPattern": pattern}
+    right_2 = gloves.compose({**v2, "g_bFlipFixup": 0}, t2, 8, wear=0.0)["colour"]
+    left_2 = gloves.compose({**v2, "g_bFlipFixup": 1}, t2, 8, wear=0.0)["colour"]
+    assert right_2[4, 1, 0] > 0.8 and right_2[4, 6, 0] < 0.1
+    assert left_2[4, 6, 0] > 0.8 and left_2[4, 1, 0] < 0.1
+
+
+def test_detail_and_damage_normals_compose_into_output_normal():
+    tilted_x = flat((0.9, 0.5, 0.8, 1.0), 8)  # positive X slope
+    tilted_y = flat((0.5, 0.9, 0.8, 1.0), 8)  # positive Y slope
+    base_flat = flat((0.5, 0.5, 1.0, 1.0), 8)
+    values = older_values(g_fDetailNormalContrast1=1.0, g_vDamageLevels1=(0.0, 0.2, 0.0, 0.0))
+    textures = {
+        **older_textures(),
+        "g_tNormal": base_flat,
+        "g_tDetailNormal1": tilted_x,
+        "g_tDamageNormal1": tilted_y,
+        "g_tSurface": flat((1.0, 1.0, 0.0, 1.0), 8),
+        "g_tGrunge1": flat(1.0, 8),
+    }
+    fresh_n = gloves.compose(values, textures, 8, wear=0.0)["normal"][4, 1]
+    worn_n = gloves.compose(values, textures, 8, wear=1.0)["normal"][4, 1]
+    assert fresh_n[0] > 0.7 and abs(float(fresh_n[1] - 0.5)) < 0.05  # detail normal dominates when fresh
+    assert worn_n[1] > 0.7 and abs(float(worn_n[0] - 0.5)) < 0.05  # damage normal takes over when worn
+
+
+def test_color_adjust_matrices_match_identity_brightness_and_tint():
+    ident_cc = gloves.matrix_color_correct2(1.0, 1.0, 1.0, (0.5, 0.5, 0.5))
+    assert np.allclose(ident_cc, np.eye(4, dtype=np.float32), atol=1e-5)
+
+    bright = gloves.matrix_color_correct2(1.0, 1.0, 2.0, (0.5, 0.5, 0.5))
+    rgb = np.array((0.2, 0.3, 0.4, 1.0), dtype=np.float32)
+    assert np.allclose((rgb @ bright)[:3], (0.4, 0.6, 0.8), atol=1e-5)
+
+    ident_tint = gloves.matrix_color_tint2((1.0, 1.0, 1.0), 1.0)
+    assert np.allclose(ident_tint, np.eye(4, dtype=np.float32), atol=1e-5)
+
+    red_tint = gloves.matrix_color_tint2((1.0, 0.0, 0.0), 1.0)
+    tinted = (np.array((0.5, 0.5, 0.5, 1.0), dtype=np.float32) @ red_tint)[:3]
+    assert tinted[0] > tinted[1] and tinted[0] > tinted[2]
+
+
+def test_hemioct_aniso_decoding_recovers_normal_and_roughness():
+    raw = np.array([[[0.6, 0.5019608, 0.4, 0.5019608]]], dtype=np.float32)
+    normal, rough = gloves._decode_hemioct_aniso(raw)
+    assert np.allclose(normal[0, 0], (0.0, 0.0, 1.0), atol=1e-3)
+    assert np.allclose(rough[0, 0], (0.6, 0.4), atol=1e-5)
+
+
+def test_newer_shader_layer_order_and_substrate_wear():
+    layer_id = np.zeros((8, 8, 4), dtype=np.float32)
+    layer_id[:4, :4, 0] = 1.0  # layer 1 (R)
+    layer_id[:4, 4:, 1] = 1.0  # layer 2 (G)
+    layer_id[4:, :4, 2] = 1.0  # layer 3 (B)
+    # bottom-right stays (0, 0, 0) -> layer 4
+    values = {"g_tLayerId": "i", "F_TINT_ID": 0, "F_PATTERN": 0, "g_vDamageMinMax1": (0.0, 1.0)}
+    textures = {
+        "g_tLayerId": layer_id,
+        "g_tSurface1": flat((1.0, 0.0, 0.0, 0.0), 8),
+        "g_tSubstrate1": flat((0.0, 0.0, 1.0, 0.0), 8),
+        "g_tSurface2": flat((0.0, 1.0, 0.0, 0.0), 8),
+        "g_tSurface3": flat((0.0, 0.0, 1.0, 0.0), 8),
+        "g_tSurface4": flat((1.0, 1.0, 0.0, 0.0), 8),
+        "g_tSurfaceProperties1": flat((1.0, 0.0, 0.0, 0.8), 8),
+        "g_tSubstrateProperties1": flat((1.0, 0.0, 0.0, 0.2), 8),
+        "g_tDamage1": flat(1.0, 8),
+        "g_tObjectProperties": flat((1.0, 0.4, 0.0, 0.0), 8),
+    }
+    fresh = gloves.compose(values, textures, 8, wear=0.0)["colour"]
+    assert fresh[1, 1, 0] > 0.9 and fresh[1, 1, 1] < 0.05  # layer 1 red
+    assert fresh[1, 6, 1] > 0.9 and fresh[1, 6, 0] < 0.05  # layer 2 green
+    assert fresh[6, 1, 2] > 0.9 and fresh[6, 1, 0] < 0.05  # layer 3 blue
+    assert fresh[6, 6, 0] > 0.9 and fresh[6, 6, 1] > 0.9 and fresh[6, 6, 2] < 0.05  # layer 4 yellow
+
+    worn = gloves.compose(values, textures, 8, wear=1.0)["colour"]
+    assert worn[1, 1, 2] > worn[1, 1, 0]  # worn layer 1 exposes blue substrate

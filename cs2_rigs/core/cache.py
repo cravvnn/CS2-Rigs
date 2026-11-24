@@ -75,8 +75,9 @@ class Cache:
     def clip_preview_dir(self) -> Path:
         return self.version_dir / "clip_previews"
 
-    def texture_dir(self, path: str) -> Path:
-        digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+    def texture_dir(self, path: str, raw: bool = False) -> Path:
+        key = f"{path}|raw" if raw else path
+        digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         return self.version_dir / "textures" / digest
 
     def map_dir(self, name: str) -> Path:

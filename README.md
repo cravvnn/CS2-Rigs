@@ -117,10 +117,9 @@ Gloves**. The agent's default gloves are hidden and the glove model goes on its
 skeleton, so the hands follow every clip. **Remove Gloves** brings the defaults back.
 The finish is built once per hand, so left and right differ the way they do in the game.
 
-The game paints gloves with a different shader from weapons, and its exact maths is
-not known. Gloves keep the game's colours, patterns, materials and wear textures but
-are an approximation: expect them close to the game, not the same. All 94 glove
-finishes can be applied.
+The finish is built from the game's `csgo_customglove` shader inputs for both
+generations of glove finishes, including detail and damage normals, wear and
+left/right pattern flipping. All 94 glove finishes can be applied.
 
 ### Controls
 
@@ -185,7 +184,8 @@ passes on Valve's assets with it; share renders, or files with linked maps and n
 This is an alpha. Not done yet:
 
 - **Stickers.**
-- **Glove finishes** are approximated: wear and the layered materials are close to the game but not exact, and the detail normal maps are left out.
+- **Glove finishes:** cloth sheen and anisotropic gloss are not reproduced, so knit and
+  fabric gloves look a little flatter than in the game.
 - **Render-time effects** such as pearlescence, glitter and iridescence.
 - **Dual Berettas:** the left pistol does not follow the clip.
 - **Weapon parts in clips** move only in clips made for the held weapon: a butterfly

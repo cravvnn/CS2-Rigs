@@ -227,9 +227,14 @@ class Converter:
             options += ["--gltf_export_materials", "--gltf_textures_adapt"]
         return self._convert(package, path, out_dir, ".glb", options)
 
-    def export_texture(self, package: Path, path: str, out_dir: Path, suffix: str = ".png") -> Path:
-        """Convert one compiled texture in `out_dir`; return the image. Float textures come out as .exr."""
-        return self._convert(package, path, out_dir, suffix, [])
+    def export_texture(self, package: Path, path: str, out_dir: Path, suffix: str = ".png", raw: bool = False) -> Path:
+        """Convert one compiled texture in `out_dir`; return the image. Float textures come out as .exr.
+
+        Set `raw` to keep the stored channels untouched (needed for HemiOctAnisoRoughness textures
+        that Source2Viewer's automatic decoder otherwise misinterprets).
+        """
+        options = ["--texture_decode_flags", "none"] if raw else []
+        return self._convert(package, path, out_dir, suffix, options)
 
     def export_model(self, package: Path, model_path: str, out_dir: Path, clips: list[str], materials: bool) -> Path:
         """Export a model with the named clips. A model exported without a clip has no skeleton."""

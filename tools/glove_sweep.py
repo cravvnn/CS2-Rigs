@@ -64,10 +64,13 @@ for kit in kits:
             if lost:
                 raise RuntimeError(f"textures not in the game files: {', '.join(f'{name} {values[name]}' for name in lost)}")
             if compose:
+                raw_names = gloves.raw_texture_names(values)
                 for name in names:
-                    if values[name] not in loaded:
-                        loaded[values[name]] = paint._pixels(current.texture(values[name]))
-                result = gloves.compose(values, {name: loaded[values[name]] for name in names}, 64, 0.2)
+                    raw = name in raw_names
+                    cache_key = (values[name], raw)
+                    if cache_key not in loaded:
+                        loaded[cache_key] = paint._pixels(current.texture(values[name], raw=raw))
+                result = gloves.compose(values, {name: loaded[(values[name], name in raw_names)] for name in names}, 64, 0.2)
                 if not (0.0 <= float(result["colour"].min()) and float(result["colour"].max()) <= 1.0):
                     raise RuntimeError("colour out of range")
     except Exception as exc:  # noqa: BLE001 - every failure belongs in the report

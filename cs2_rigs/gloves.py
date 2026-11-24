@@ -100,19 +100,23 @@ def _compose_hand(session: Session, kit: skins_mod.PaintKit, left: bool, wear: f
     values = session.glove_values(kit, left, seed, wear)
     key = f"glove|{kit.name}|{'left' if left else 'right'}|{wear:.4f}|{seed}|{TEXTURE_SIZE}|{gloves_mod.VERSION}|{composite.VERSION}"
     out_dir = session.cache.finish_dir(key)
-    files = {"colour": out_dir / "colour.png", "surface": out_dir / "surface.png"}
+    files = {"colour": out_dir / "colour.png", "surface": out_dir / "surface.png", "normal": out_dir / "normal.png"}
     if not all(path.is_file() for path in files.values()):
-        for name in gloves_mod.texture_names(values):
+        names = gloves_mod.texture_names(values)
+        raw_names = gloves_mod.raw_texture_names(values)
+        for name in names:
             path = values[name]
-            if path not in loaded:
-                loaded[path] = paint._pixels(session.texture(path))
-        result = gloves_mod.compose(values, {name: loaded[values[name]] for name in gloves_mod.texture_names(values)}, TEXTURE_SIZE, wear)
+            raw = name in raw_names
+            cache_key = (path, raw)
+            if cache_key not in loaded:
+                loaded[cache_key] = paint._pixels(session.texture(path, raw=raw))
+        textures = {name: loaded[(values[name], name in raw_names)] for name in names}
+        result = gloves_mod.compose(values, textures, TEXTURE_SIZE, wear)
         out_dir.mkdir(parents=True, exist_ok=True)
         paint._save(files["colour"], result["colour"], colour=True)
         # Occlusion, roughness and metalness packed the way the glTF importer wires them.
-        paint._save(files["surface"], np.stack((np.ones_like(result["roughness"]), result["roughness"], result["metalness"]), axis=-1), colour=False)
-    if values.get("g_tNormal"):
-        files["normal"] = session.texture(values["g_tNormal"])
+        paint._save(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1), colour=False)
+        paint._save(files["normal"], result["normal"], colour=False)
     return files
 
 

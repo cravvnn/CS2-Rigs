@@ -98,11 +98,11 @@ class Session:
         except KeyError as exc:
             raise SetupError(f"{gloves_mod.label(kit)} cannot be shown yet: {exc}") from exc
 
-    def texture(self, path: str) -> Path:
+    def texture(self, path: str, raw: bool = False) -> Path:
         """Convert one texture named by a material (a '.vtex' path); returns the image file."""
         path = path.replace("\\", "/").removesuffix("_c") + "_c"
         suffix = ".exr" if "_pfm_" in path.rsplit("/", 1)[-1] else ".png"
-        return self.converter.export_texture(self.install.main_package, path, self.cache.texture_dir(path), suffix)
+        return self.converter.export_texture(self.install.main_package, path, self.cache.texture_dir(path, raw=raw), suffix, raw=raw)
 
     def agent(self, key: str) -> catalog_mod.Agent:
         agent = next((a for a in catalog_mod.catalog_agents(self.catalog()) if a.key == key), None)
