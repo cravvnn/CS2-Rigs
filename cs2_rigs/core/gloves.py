@@ -23,7 +23,7 @@ import numpy as np
 from . import composite
 from .composite import fit, linear_to_srgb, luma, mix, sample, saturate, smoothstep, srgb_to_linear
 
-VERSION = 2  # raise when results change, so textures composed earlier are not reused
+VERSION = 3  # raise when results change, so textures composed earlier are not reused
 SEPARATOR = " | "
 RECIPE_FOLDER = "gloves/paints/"
 LAYERS = 4
@@ -61,6 +61,7 @@ _DEFAULT_TINTS = (
 )
 _LUMA_30_59_11 = np.array((0.30, 0.59, 0.11), dtype=np.float32)
 _GRAY_AXIS = np.float32(0.577)
+SHEEN_SCALE = 0.667  # the shader's g_flSheenScale when a finish leaves it out
 
 # item name in items_game.txt -> (name shown, model that wears the finish)
 GLOVES = {
@@ -404,22 +405,41 @@ def compose(values: dict, textures: dict, size: int, wear: float = 0.0) -> dict:
     `values` is the resolved finish (shader values by their game names, textures
     as package paths) and `textures` maps the names `texture_names` lists to
     images. Returns `colour` (sRGB encoded), `roughness`, `metalness`,
-    `occlusion`, and `normal` (tangent-space RGB in `[0, 1]`), sized `size`,
-    with row 0 at the top.
+    `occlusion`, `normal` (tangent-space RGB in `[0, 1]`), `cloth` and
+    `sheen` (see `sheen`), sized `size`, with row 0 at the top.
     """
     wear = float(min(max(wear, 0.0), 1.0))
     centres = (np.arange(size, dtype=np.float32) + 0.5) / size
     u, v = np.meshgrid(centres, centres)
     build = _newer if generation(values) == 2 else _older
-    colour, rough, metal, normal, occlusion = build(values, textures, size, wear, u, v)
+    colour, rough, metal, normal, occlusion, cloth = build(values, textures, size, wear, u, v)
     shape = (size, size)
+    colour = np.broadcast_to(colour, shape + (3,))
+    cloth, tint = sheen(values, colour, np.broadcast_to(cloth, shape))
     return {
         "colour": linear_to_srgb(np.broadcast_to(colour, shape + (3,))),
         "roughness": saturate(np.broadcast_to(rough, shape)).astype(np.float32),
         "metalness": saturate(np.broadcast_to(metal, shape)).astype(np.float32),
         "normal": saturate(np.broadcast_to(normal, shape + (3,)) * np.float32(0.5) + np.float32(0.5)).astype(np.float32),
         "occlusion": saturate(np.broadcast_to(occlusion, shape)).astype(np.float32),
+        "cloth": cloth,
+        "sheen": tint,
     }
+
+
+def sheen(values: dict, colour, cloth):
+    """Where a glove is cloth, and the colour of its sheen there.
+
+    Finishes with `F_CLOTH_SHADING` are drawn by the game's character shader
+    in cloth mode: where the cloth mask is set, the usual specular gives way to
+    a velvety sheen coloured `sqrt(albedo) * g_flSheenScale`. Takes the linear
+    colour and returns the mask and the (linear) sheen colour.
+    """
+    if not values.get("F_CLOTH_SHADING"):
+        cloth = np.zeros_like(cloth)
+    scale = np.float32(_number(values, "g_flSheenScale", SHEEN_SCALE))
+    tint = saturate(np.sqrt(np.maximum(colour, np.float32(0.0))) * scale)
+    return saturate(cloth).astype(np.float32), tint.astype(np.float32)
 
 
 def _older(p, textures, size, wear, u, v):
@@ -747,7 +767,8 @@ def _older(p, textures, size, wear, u, v):
     leveled_val = mix(np.minimum(levels[..., 0], ref_luma), levels[..., 2], saturate(np.power(np.maximum(albedo_max, np.float32(0.0)), levels[..., 1])))
     leveled = hue_out * (leveled_val / np.maximum(hue_max, np.float32(1e-6)))[..., None]
     colour = mix(albedo_varied, leveled, wear_prog)
-    return colour, rough, metal, normal_out, occlusion
+    cloth = mix(per_layer("g_fDetailCloth", 0.0), per_layer("g_fDamageCloth", 0.0), np.maximum(damage_detail, edge_mask)) * (np.float32(1.0) - metal)
+    return colour, rough, metal, normal_out, occlusion, cloth
 
 
 def _newer(p, textures, size, wear, u, v):
@@ -823,6 +844,8 @@ def _newer(p, textures, size, wear, u, v):
         "bevel_rough": np.zeros(shape, dtype=np.float32),
         "bevel_aniso": np.zeros(shape, dtype=np.float32),
         "bevel_metal": np.zeros(shape, dtype=np.float32),
+        "bevel_cloth": np.zeros(shape, dtype=np.float32),
+        "burn_cloth": np.zeros(shape, dtype=np.float32),
         "bevel_to_sub": np.zeros(shape, dtype=np.float32),
         "burn_metal": np.zeros(shape, dtype=np.float32),
         "burn_grime": np.zeros(shape, dtype=np.float32),
@@ -912,6 +935,8 @@ def _newer(p, textures, size, wear, u, v):
         scalars["bevel_rough"] += np.float32(_number(p, f"g_fDamageBevelRoughnessBrightness{i}", 1.0)) * w
         scalars["bevel_aniso"] += np.float32(_number(p, f"g_fDamageBevelAnisotropy{i}", 0.0)) * w
         scalars["bevel_metal"] += np.float32(_number(p, f"g_fDamageBevelMetalness{i}", 0.0)) * w
+        scalars["bevel_cloth"] += np.float32(_number(p, f"g_fDamageBevelCloth{i}", 0.0)) * w
+        scalars["burn_cloth"] += np.float32(_number(p, f"g_fBurnishingCloth{i}", 0.0)) * w
         scalars["bevel_to_sub"] += np.float32(1.0 if p.get(f"g_bDamageBevelBlendToSubstrate{i}") else 0.0) * w
         scalars["burn_metal"] += np.float32(_number(p, f"g_fBurnishingMetalness{i}", 0.0)) * w
         scalars["burn_grime"] += np.float32(_number(p, f"g_fBurnishingGrime{i}", 0.5)) * w
@@ -976,6 +1001,9 @@ def _newer(p, textures, size, wear, u, v):
 
     surf_ao, surf_metal, surf_height = surf_props[..., 0], surf_props[..., 1], surf_props[..., 3]
     sub_ao, sub_metal, sub_height = sub_props[..., 0], sub_props[..., 1], sub_props[..., 3]
+    # Cloth is the blue channel of the layer properties, never on metal.
+    surf_cloth = surf_props[..., 2] * (np.float32(1.0) - surf_metal)
+    sub_cloth = sub_props[..., 2] * (np.float32(1.0) - sub_metal)
     bevel_rough_xy = surf_rough_xy * scalars["bevel_rough"][..., None]
     bevel_rough_xy = np.stack((bevel_rough_xy[..., 0], mix(bevel_rough_xy[..., 0], bevel_rough_xy[..., 1], scalars["bevel_aniso"])), axis=-1)
 
@@ -1011,6 +1039,7 @@ def _newer(p, textures, size, wear, u, v):
             paint_cov = (pat_id_mask * pat_surf[..., 3]) * (surf_mask_t if respect_tint_mask else np.float32(1.0))
             surf_col = mix(surf_col, pat_surf[..., :3], paint_cov[..., None])
             surf_metal = mix(surf_metal, pat_props[..., 0], paint_cov)
+            surf_cloth = mix(surf_cloth, np.float32(_number(p, "g_fPatternCloth", 0.0)), paint_cov)
             surf_rough_xy = mix(surf_rough_xy, pat_props[..., 1:2], paint_cov[..., None])
             if is_puffy:
                 thresh = np.float32(_number(p, "g_fPatternTranslucencyThreshold", 0.01))
@@ -1081,10 +1110,11 @@ def _newer(p, textures, size, wear, u, v):
     grime_amt = mix(grime_base, np.maximum(grime_base, scalars["burn_grime"]), burn_sat) * grime_rgba[..., 3]
     rough = mix(rough_xy[..., 0], rough_xy[..., 0] * scalars["grime_rough"], grime_amt)
     metal = mix(mix(sub_metal, mix(surf_metal, scalars["bevel_metal"], bevel_mask), surf_mask), scalars["burn_metal"], burn_sat) * (np.float32(1.0) - grime_amt)
+    cloth = mix(mix(sub_cloth, mix(surf_cloth, scalars["bevel_cloth"], bevel_mask), surf_mask), scalars["burn_cloth"], burn_sat) * (np.float32(1.0) - metal)
 
     sub_final = mix(sub_col, sub_burn_col, sub_burn[..., None])
     surf_final = mix(surf_col, surf_burn_col, surf_burn[..., None])
     bevel_final = mix(mix(bevel_col, bevel_burn_col, surf_burn[..., None]), sub_final, (scalars["bevel_to_sub"] * (np.float32(1.0) - bevel_t))[..., None])
     combined = mix(sub_final, mix(surf_final, bevel_final, bevel_mask[..., None]), surf_mask[..., None])
     colour = mix(combined, grime_rgba[..., :3], grime_amt[..., None])
-    return colour, rough, metal, normal_out, occlusion
+    return colour, rough, metal, normal_out, occlusion, cloth

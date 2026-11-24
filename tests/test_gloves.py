@@ -347,3 +347,33 @@ def test_newer_shader_layer_order_and_substrate_wear():
 
     worn = gloves.compose(values, textures, 8, wear=1.0)["colour"]
     assert worn[1, 1, 2] > worn[1, 1, 0]  # worn layer 1 exposes blue substrate
+
+
+def test_cloth_gets_a_sheen_only_where_the_finish_is_cloth_and_not_metal():
+    values = older_values(F_CLOTH_SHADING=1, g_fDetailCloth1=1.0, g_fDetailCloth2=1.0, g_flSheenScale=2.0)
+    out = gloves.compose(values, older_textures(), 8, wear=0.0)
+    assert out["cloth"].shape == (8, 8) and out["sheen"].shape == (8, 8, 3)
+    assert out["cloth"][4, 1] == pytest.approx(1.0)  # leather on the left is cloth
+    assert out["cloth"][4, 6] == pytest.approx(0.0)  # the metal on the right never is
+    off = gloves.compose({**values, "F_CLOTH_SHADING": 0}, older_textures(), 8, wear=0.0)
+    assert off["cloth"].max() == 0.0
+
+
+def test_the_sheen_is_the_square_root_of_the_colour_scaled_and_clamped():
+    colour = np.array([[[0.25, 0.04, 1.0]]], dtype=np.float32)
+    cloth, tint = gloves.sheen({"F_CLOTH_SHADING": 1}, colour, np.ones((1, 1), dtype=np.float32))
+    assert tint[0, 0] == pytest.approx((0.5 * 0.667, 0.2 * 0.667, 0.667), rel=1e-4)  # the shader's default scale
+    _, bright = gloves.sheen({"F_CLOTH_SHADING": 1, "g_flSheenScale": 2.5}, colour, cloth)
+    assert bright[0, 0] == pytest.approx((1.0, 0.5, 1.0), rel=1e-4)
+
+
+def test_the_newer_shader_reads_cloth_from_the_layer_properties():
+    values = {"g_tLayerId": "i", "g_tSurfaceProperties1": "sp", "g_tSubstrateProperties1": "bp", "F_CLOTH_SHADING": 1, "g_fDamageBevelCloth1": 1.0, "g_vDamageMinMax1": (0.0, 1.0, 0.0, 0.0)}
+    layer_id = np.zeros((8, 8, 4), dtype=np.float32)
+    layer_id[..., 0] = 1.0
+    props = flat((1.0, 0.0, 1.0, 0.8), 8)  # occlusion, metalness, cloth, height
+    textures = {"g_tLayerId": layer_id, "g_tSurface1": flat((0.5, 0.5, 0.5, 1.0), 8), "g_tSurfaceProperties1": props, "g_tSubstrateProperties1": props}
+    out = gloves.compose(values, textures, 8, wear=0.0)
+    assert out["cloth"].min() == pytest.approx(1.0)
+    metal = {**textures, "g_tSurfaceProperties1": flat((1.0, 1.0, 1.0, 0.8), 8), "g_tSubstrateProperties1": flat((1.0, 1.0, 1.0, 0.2), 8)}
+    assert gloves.compose(values, metal, 8, wear=0.0)["cloth"].max() == pytest.approx(0.0)

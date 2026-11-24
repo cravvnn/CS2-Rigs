@@ -184,8 +184,8 @@ passes on Valve's assets with it; share renders, or files with linked maps and n
 This is an alpha. Not done yet:
 
 - **Stickers.**
-- **Glove finishes:** cloth sheen and anisotropic gloss are not reproduced, so knit and
-  fabric gloves look a little flatter than in the game.
+- **Glove finishes:** the anisotropic gloss of a few newer silk finishes is not reproduced,
+  and Blender's cloth sheen is a little softer than the game's.
 - **Render-time effects** such as pearlescence, glitter and iridescence.
 - **Dual Berettas:** the left pistol does not follow the clip.
 - **Weapon parts in clips** move only in clips made for the held weapon: a butterfly

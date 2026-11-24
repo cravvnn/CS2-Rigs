@@ -98,15 +98,15 @@ def _pixels(path: Path) -> np.ndarray:
 
 
 def _save(path: Path, values: np.ndarray, colour: bool) -> None:
-    """Write a (height, width, 3) array, top row first, as an 8-bit PNG."""
-    height, width = values.shape[:2]
-    image = bpy.data.images.new(path.stem, width, height, alpha=False)
+    """Write a (height, width, 3 or 4) array, top row first, as an 8-bit PNG."""
+    height, width, channels = values.shape
+    image = bpy.data.images.new(path.stem, width, height, alpha=channels == 4)
     try:
         if not colour:
             image.colorspace_settings.name = "Non-Color"
         rgba = np.ones((height, width, 4), dtype=np.float32)
         # Blender keeps byte images in display space, so sRGB-encoded values go in unchanged.
-        rgba[..., :3] = values[::-1]
+        rgba[..., :channels] = values[::-1]
         image.pixels.foreach_set(rgba.ravel())
         image.filepath_raw = str(path)
         image.file_format = "PNG"

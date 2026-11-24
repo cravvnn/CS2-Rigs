@@ -24,6 +24,7 @@ SEED_PROP = "cs2rig_gloves_seed"
 DEFAULT_GLOVES = "thirdperson_default_gloves"  # the agent's own mesh for its hands
 MESH_PART = "worldmodel"  # the third-person mesh of a glove model
 TEXTURE_SIZE = 2048
+SHEEN_NODE = "CS2Rig Sheen"  # the image node that feeds the cloth sheen
 
 
 def _default_gloves(armature: bpy.types.Object) -> bpy.types.Object | None:
@@ -101,6 +102,7 @@ def _compose_hand(session: Session, kit: skins_mod.PaintKit, left: bool, wear: f
     key = f"glove|{kit.name}|{'left' if left else 'right'}|{wear:.4f}|{seed}|{TEXTURE_SIZE}|{gloves_mod.VERSION}|{composite.VERSION}"
     out_dir = session.cache.finish_dir(key)
     files = {"colour": out_dir / "colour.png", "surface": out_dir / "surface.png", "normal": out_dir / "normal.png"}
+    sheen = out_dir / "sheen.png"  # only written for a finish with cloth on it
     if not all(path.is_file() for path in files.values()):
         names = gloves_mod.texture_names(values)
         raw_names = gloves_mod.raw_texture_names(values)
@@ -117,7 +119,55 @@ def _compose_hand(session: Session, kit: skins_mod.PaintKit, left: bool, wear: f
         # Occlusion, roughness and metalness packed the way the glTF importer wires them.
         paint._save(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1), colour=False)
         paint._save(files["normal"], result["normal"], colour=False)
+        if result["cloth"].max() > 0.0:
+            # Sheen colour (linear) with the cloth mask in alpha.
+            paint._save(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1), colour=False)
+    if sheen.is_file():
+        files["sheen"] = sheen
     return files
+
+
+def _set_sheen(material: bpy.types.Material, path) -> None:
+    """Give the cloth parts of a glove the game's sheen.
+
+    The game's cloth shading swaps the usual specular for a soft sheen where the
+    cloth mask is set. Principled BSDF's sheen is the same kind of lobe, so the
+    mask drives its weight and turns the usual specular down to match.
+    """
+    tree = material.node_tree
+    shader = paint._principled(material)
+    if shader is None:
+        return
+    image = bpy.data.images.load(str(path), check_existing=True)
+    image.colorspace_settings.name = "Non-Color"
+    image.alpha_mode = "CHANNEL_PACKED"
+    if image.packed_file is None:
+        image.pack()
+    node = tree.nodes.new("ShaderNodeTexImage")
+    node.name = node.label = SHEEN_NODE
+    node.image = image
+    node.location = (shader.location.x - 600, shader.location.y - 700)
+    colour = paint._image_node(material, "Base Color")
+    if colour is not None:
+        for link in colour.inputs["Vector"].links:
+            tree.links.new(link.from_socket, node.inputs["Vector"])
+    tree.links.new(node.outputs["Color"], shader.inputs["Sheen Tint"])
+    tree.links.new(node.outputs["Alpha"], shader.inputs["Sheen Weight"])
+    for link in shader.inputs["Roughness"].links:
+        # The game's sheen uses roughness squared, as Blender's sheen roughness does.
+        squared = tree.nodes.new("ShaderNodeMath")
+        squared.operation = "MULTIPLY"
+        squared.location = (node.location.x + 300, node.location.y + 150)
+        tree.links.new(link.from_socket, squared.inputs[0])
+        tree.links.new(link.from_socket, squared.inputs[1])
+        tree.links.new(squared.outputs["Value"], shader.inputs["Sheen Roughness"])
+    specular = tree.nodes.new("ShaderNodeMath")
+    specular.operation = "MULTIPLY_ADD"  # (1 - cloth) * level: the usual specular fades out on cloth
+    specular.location = (node.location.x + 300, node.location.y - 150)
+    specular.inputs[1].default_value = -shader.inputs["Specular IOR Level"].default_value
+    specular.inputs[2].default_value = shader.inputs["Specular IOR Level"].default_value
+    tree.links.new(node.outputs["Alpha"], specular.inputs[0])
+    tree.links.new(specular.outputs["Value"], shader.inputs["Specular IOR Level"])
 
 
 def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0) -> None:
@@ -140,6 +190,8 @@ def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.typ
                 continue  # the bare forearm that comes with some gloves keeps its own look
             files = _compose_hand(session, kit, gloves_mod.is_left(name), wear, seed, loaded)  # may take a while the first time
             paint.set_images(material, files)
+            if "sheen" in files:
+                _set_sheen(material, files["sheen"])
             material.name = f"{material.name}.{kit.name}"
     except Exception:
         remove_gloves(armature)
