@@ -9,8 +9,8 @@ shader values the compositor needs. No Blender imports here.
 from __future__ import annotations
 
 import json
-import random
 import re
+import struct
 from pathlib import Path
 
 from .converter import Converter
@@ -26,6 +26,62 @@ SEED_VARIABLE = "g_nRandomSeed"
 ALT_SEED_VARIABLE = "g_nRandomSeedAlt"  # used by materials that carry the target's 'seed_offset' attribute
 ALT_SEED_STEP = 1000003
 WEAR_VARIABLE = "g_flWearAmount"
+
+# Valve's CUniformRandomStream (Park-Miller LCG with a 32-entry shuffle table).
+_IA = 16807
+_IM = 2147483647
+_IQ = 127773
+_IR = 2836
+_NTAB = 32
+_NDIV = 1 + (_IM - 1) // _NTAB
+_AM = 1.0 / _IM
+_RNMX = 1.0 - 1.2e-7
+_AXES = {"x": 0, "y": 1, "z": 2, "w": 3}
+
+
+def _f32(value: float) -> float:
+    return struct.unpack("<f", struct.pack("<f", value))[0]
+
+
+class UniformRandomStream:
+    """Reproduces the game's CUniformRandomStream for paint-seed placement."""
+
+    def __init__(self, seed: int = 0):
+        self._idum = 0
+        self._iy = 0
+        self._iv = [0] * _NTAB
+        self.set_seed(seed)
+
+    def set_seed(self, seed: int) -> None:
+        seed = ((int(seed) + 0x80000000) & 0xFFFFFFFF) - 0x80000000
+        self._idum = seed if seed < 0 else -seed
+        self._iy = 0
+
+    def next_int(self) -> int:
+        if self._idum <= 0 or not self._iy:
+            self._idum = 1 if -self._idum < 1 else -self._idum
+            for j in range(_NTAB + 7, -1, -1):
+                k = self._idum // _IQ
+                self._idum = _IA * (self._idum - k * _IQ) - _IR * k
+                if self._idum < 0:
+                    self._idum += _IM
+                if j < _NTAB:
+                    self._iv[j] = self._idum
+            self._iy = self._iv[0]
+        k = self._idum // _IQ
+        self._idum = _IA * (self._idum - k * _IQ) - _IR * k
+        if self._idum < 0:
+            self._idum += _IM
+        j = self._iy // _NDIV
+        self._iy = self._iv[j]
+        self._iv[j] = self._idum
+        return self._iy
+
+    def uniform(self, low: float = 0.0, high: float = 1.0) -> float:
+        fl = _f32(_AM * self.next_int())
+        if fl > _RNMX:
+            fl = _f32(_RNMX)
+        return _f32(fl * _f32(high - low) + _f32(low))
 
 _TOKEN = re.compile(
     r"""
@@ -249,17 +305,7 @@ def load_or_build_library(converter: Converter, package: Path, cache_file: Path)
 
 def not_shown(values: dict) -> list[str]:
     """Parts of a resolved finish the compositor leaves out, in words for the user."""
-    missing = []
-    for switch, label in (
-        ("F_OVERLAY_TEXTURE", "overlay"),
-        ("F_CASE_HARDENING", "case hardening"),
-        ("F_SPRAYPAINT_HALFTONE", "halftone"),
-        ("F_PATINA_AGE", "patina ageing"),
-        ("F_USE_ALL_MASKS", "masked spray"),
-    ):
-        if values.get(switch):
-            missing.append(label)
-    return missing
+    return []
 
 
 def recipe_path(kit_name: str, composite_material_path: str = "") -> str:
@@ -315,20 +361,35 @@ def _passes(step: dict, containers: dict) -> bool:
 
 
 def _roll(step: dict, variables: dict, containers: dict, seed: int) -> None:
-    """Give seeded variables a value inside their range, in the order the recipe lists them.
+    """Roll seeded variables inside their bounds with Valve's uniform random stream.
 
-    The game's own random numbers are not known, so a seed gives a repeatable
-    placement here but not the placement the same seed has in the game.
+    Variables absent from the container still advance the stream by one draw per
+    listed channel, matching how the game evaluates composite recipes.
     """
-    rng = random.Random(seed)
+    seed_var = step.get("seed", "")
+    if "." in seed_var:
+        seed_alias, seed_name = seed_var.split(".", 1)
+        seed = int(containers.get(seed_alias, {}).get(seed_name, seed))
+    rng = UniformRandomStream(seed)
     for target in step["roll"]:
-        alias, name, *_ = target.split(".")
+        parts = target.split(".")
+        alias, name = parts[0], parts[1]
+        channels = parts[2] if len(parts) > 2 else ""
         bounds = variables.get(alias, {}).get(name)
         if bounds is None or bounds[1] is None:
+            for _ in (channels or "x"):
+                rng.uniform(0.0, 1.0)
             continue
         _, low, high = bounds
         if isinstance(low, (list, tuple)):
-            containers[alias][name] = tuple(rng.uniform(a, b) for a, b in zip(low, high))
+            if channels:
+                current = list(containers[alias][name])
+                for axis in channels:
+                    index = _AXES[axis]
+                    current[index] = rng.uniform(low[index], high[index])
+                containers[alias][name] = tuple(current)
+            else:
+                containers[alias][name] = tuple(rng.uniform(a, b) for a, b in zip(low, high))
         else:
             containers[alias][name] = rng.uniform(low, high)
 
@@ -420,8 +481,11 @@ def resolve(library: dict, path: str, weapon_inputs: dict, weapon_material: dict
     for name, value in (surface or {}).items():
         if name.startswith("F_") and name not in ("F_ROUGHNESS_MODE", "F_OUTPUT_MODE"):
             colour[name] = value
+    input_normal = colour.get("g_tNormal")
     if final.get("g_tNormal"):
         colour["g_tNormal"] = final["g_tNormal"]
     elif attributes is None:
         colour.pop("g_tNormal", None)
+    if input_normal and (colour.get("F_CASE_HARDENING") or colour.get("F_PATINA_AGE")):
+        colour["g_tInputNormal"] = input_normal
     return colour

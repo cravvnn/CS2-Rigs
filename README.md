@@ -97,13 +97,13 @@ like it does in the game. The result is kept in the cache and packed into the .b
 
 - **Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
   the range the finish allows.
-- **Seed** moves the pattern, wear and grime around. A seed gives the same
-  result every time here, but not the placement that seed has in the game.
+- **Seed** moves the pattern, wear and grime around using the same random
+  sequence as the game, so pattern seeds (such as Case Hardened or Fade) match.
 - Older finishes are laid out for the weapon's previous model, so applying one
   switches the weapon to that body.
 
-1,384 of the game's 1,479 weapon and knife finishes can be applied. Parts that are
-not done yet are named when you apply a finish that has them; see [Known issues](#known-issues).
+1,384 of the game's 1,479 weapon and knife finishes can be applied; see
+[Known issues](#known-issues) for render-time effects that are not reproduced.
 
 ![AK-47 with the Bloodsport finish](docs/finish.png)
 
@@ -186,9 +186,6 @@ This is an alpha. Not done yet:
 
 - **Stickers.**
 - **Glove finishes** are approximated: wear and the layered materials are close to the game but not exact, and the detail normal maps are left out.
-- **Finish parts:** overlays, halftone and masked spray, the case-hardening pass and
-  patina ageing. A finish that uses them is applied without them and the panel says which.
-- **Seed placement** does not match the game's.
 - **Render-time effects** such as pearlescence, glitter and iridescence.
 - **Dual Berettas:** the left pistol does not follow the clip.
 - **Weapon parts in clips** move only in clips made for the held weapon: a butterfly

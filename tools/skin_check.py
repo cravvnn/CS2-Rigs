@@ -1,6 +1,6 @@
 """Put finishes on a held weapon in a real Blender and render them for a visual check.
 
-    blender --background --factory-startup --python tools/skin_check.py -- <out_dir> [weapon] [wear] [kit ...]
+    blender --background --factory-startup --python tools/skin_check.py -- <out_dir> [weapon] [wear] [kit[:seed] ...]
 
 Without kit names, applies one finish of every paint style the weapon is
 offered, at the given wear (default 0.15). Checks that each finish shows on
@@ -91,24 +91,29 @@ scene.render.engine = "BLENDER_EEVEE"
 scene.render.resolution_x, scene.render.resolution_y = 1400, 600
 
 if named:
-    chosen = [cs2_rigs._kits[name] for name in named]
+    chosen = []
+    for item in named:
+        name, _, raw_seed = item.partition(":")
+        chosen.append((cs2_rigs._kits[name], int(raw_seed) if raw_seed else None))
 else:
     chosen = []
     for kit in offered[weapon_key]:
-        if kit.name in usable and (kit.style, skins.uses_legacy_model(kit)) not in {(k.style, skins.uses_legacy_model(k)) for k in chosen}:
-            chosen.append(kit)
+        if kit.name in usable and (kit.style, skins.uses_legacy_model(kit)) not in {(k.style, skins.uses_legacy_model(k)) for k, _ in chosen}:
+            chosen.append((kit, None))
 wm.cs2rig_wear = wear
 bodies = [obj for obj in importer.held_weapon_objects(armature) if obj.type == "MESH" and "body" in obj.name]
-for kit in chosen:
+for kit, seed in chosen:
     wm.cs2rig_skin = kit.name
+    wm.cs2rig_seed = 0 if seed is None else seed
     started = time.time()
     assert bpy.ops.cs2rig.apply_skin() == {"FINISHED"}
     shown = [obj.name for obj in importer.held_weapon_objects(armature) if obj.type == "MESH" and not obj.hide_render and "body" in obj.name]
-    print(f"SKIN applied {kit.label} ({kit.name}, style {kit.style}) on {shown} in {time.time() - started:.1f} s")
+    print(f"SKIN applied {kit.label} ({kit.name}, style {kit.style}, seed {wm.cs2rig_seed}) on {shown} in {time.time() - started:.1f} s")
     assert paint.worn_skin(armature) == kit.name and len(shown) == 1
     # Knives have one body only, whatever the finish was made for.
     assert ("legacy" in shown[0]) == skins.uses_legacy_model(kit) or len(bodies) == 1
-    scene.render.filepath = str(out_dir / f"skin_{weapon_key}_s{kit.style}_{kit.name}_w{round(wear * 100):03d}.png")
+    seed_tag = f"_p{seed}" if seed is not None else ""
+    scene.render.filepath = str(out_dir / f"skin_{weapon_key}_s{kit.style}_{kit.name}_w{round(wear * 100):03d}{seed_tag}.png")
     bpy.ops.render.render(write_still=True)
 
 assert bpy.ops.cs2rig.remove_skin() == {"FINISHED"}

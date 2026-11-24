@@ -126,17 +126,34 @@ def _load(path: Path, colour: bool) -> bpy.types.Image:
 
 def _compose(session: Session, kit: skins_mod.PaintKit, values: dict, wear: float, out_dir: Path) -> dict:
     style = int(values.get("F_PAINT_STYLE", 0))
+    case_hardening = bool(values.get("F_CASE_HARDENING")) and style in (composite.SOLID, composite.ANTIQUED, composite.GUNSMITH)
+    ch_trilinear = case_hardening and bool(values.get("F_CASE_HARDENING_TRILINEAR"))
+    patina_age = bool(values.get("F_PATINA_AGE")) and not case_hardening and style in (composite.ANTIQUED, composite.GUNSMITH)
+    overlay = bool(values.get("F_OVERLAY_TEXTURE"))
     wanted = list(WEAPON_TEXTURES + SHARED_TEXTURES)
-    if style in composite.POSITION_STYLES:
+    if style in composite.POSITION_STYLES or ch_trilinear:
         wanted += SHAPE_TEXTURES
-    if style in composite.PATTERN_STYLES:
+    elif patina_age:
+        wanted.append("g_tPosition")
+    if style in composite.PATTERN_STYLES or case_hardening:
         wanted.append("g_tPattern")
+    if case_hardening:
+        wanted.append("g_tCaseHardeningColorRamp")
+    if patina_age:
+        wanted += ["g_tPatinaAgeColorRamp", "g_tPatinaAgeMask"]
+    if overlay:
+        wanted.append("g_tOverlay")
+        if int(values.get("F_OVERLAY_MASK", 0)) == 8:
+            wanted.append("g_tOverlayMask")
     if values.get("F_ROUGHNESS_TEXTURE"):
         wanted.append("g_tPaintRoughness")
     if values.get("F_METALNESS_TEXTURE"):
         wanted.append("g_tPaintMetalness")
     textures = {name: _pixels(session.texture(values[name])) for name in wanted if values.get(name)}
-    missing = [name for name in ("g_tWear", "g_tGrunge", "g_tPattern") if name in wanted and name not in textures]
+    if (case_hardening or patina_age) and values.get("g_tInputNormal"):
+        textures["g_tNormal"] = _pixels(session.texture(values["g_tInputNormal"]))
+    required = ("g_tWear", "g_tGrunge", "g_tPattern", "g_tCaseHardeningColorRamp", "g_tOverlay")
+    missing = [name for name in required if name in wanted and name not in textures]
     if missing:
         raise SetupError(f"{kit.label} is missing a texture it needs ({', '.join(missing)}).")
     params = {name: value for name, value in values.items() if not isinstance(value, str)}

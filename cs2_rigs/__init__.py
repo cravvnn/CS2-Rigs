@@ -831,7 +831,7 @@ def register():
     )
     wm.cs2rig_seed = IntProperty(
         name="Seed",
-        description="Varies where the pattern, wear and grime fall. The placement for a seed is not the one the game gives it",
+        description="Pattern seed (0 to 1000). Places the pattern, wear and grime where the game puts them",
         min=0,
         max=1000,
         default=0,

@@ -308,4 +308,81 @@ def test_missing_recipe_and_unshown_parts():
     assert finish.recipe_path("hy_test") == KIT
     assert finish.recipe_path("new_kit", "weapons/paints/set/new_kit.vcompmat") == "weapons/paints/set/new_kit.vcompmat"
     assert finish.not_shown({"F_PAINT_STYLE": 6}) == []
-    assert finish.not_shown({"F_OVERLAY_TEXTURE": 1, "F_CASE_HARDENING": 1, "F_PATINA_AGE": 0}) == ["overlay", "case hardening"]
+    assert finish.not_shown({"F_OVERLAY_TEXTURE": 1, "F_CASE_HARDENING": 1, "F_SPRAYPAINT_HALFTONE": 1, "F_USE_ALL_MASKS": 1, "F_PATINA_AGE": 1}) == []
+
+
+def test_uniform_random_stream_matches_valve_vectors():
+    # Valve's CUniformRandomStream clamps seed 0 to 1 on first draw, so 0 and 1 match.
+    s0, s1 = finish.UniformRandomStream(0), finish.UniformRandomStream(1)
+    assert [s0.uniform(0.0, 1.0) for _ in range(5)] == [s1.uniform(0.0, 1.0) for _ in range(5)]
+
+    # Published Fade pattern rankings across seeds 0..1000 (3rd draw = pattern rotation):
+    # min-4 are 763, 575, 897, 636 (Glock-18 max / AWP 80% min fade);
+    # max-4 are 412, 602, 359, 649 (AWP 100% max fade).
+    def nth_draw(seed, n):
+        rng = finish.UniformRandomStream(seed)
+        val = 0.0
+        for _ in range(n):
+            val = rng.uniform(0.0, 1.0)
+        return val
+
+    by_draw3 = sorted(range(1001), key=lambda s: nth_draw(s, 3))
+    assert by_draw3[:4] == [763, 575, 897, 636]
+    assert by_draw3[-4:][::-1] == [412, 602, 359, 649]
+    assert nth_draw(763, 3) == pytest.approx(0.00062723, abs=1e-6)
+    assert nth_draw(412, 3) == pytest.approx(0.99954528, abs=1e-6)
+
+    # Desert Eagle Heat Treated / AK-47 Aphrodite #490 is #1 on the 13th draw (ramp offset).
+    assert nth_draw(490, 13) == pytest.approx(0.99951899, abs=1e-6)
+    assert nth_draw(490, 13) > max(nth_draw(s, 13) for s in range(1001) if s != 490)
+
+    # M4A1-S Solitude Golden Mountain #650 lands in the low ramp band (v < 0.02).
+    assert nth_draw(650, 13) == pytest.approx(0.00382104, abs=1e-6)
+
+    # AK-47 Case Hardened #661 ("Scar"): offset X, offset Y, rotation draws.
+    scar = finish.UniformRandomStream(661)
+    assert scar.uniform(0.0, 1.0) == pytest.approx(0.31631464, abs=1e-6)
+    assert scar.uniform(0.0, 1.0) == pytest.approx(0.48698294, abs=1e-6)
+    assert scar.uniform(0.0, 360.0) == pytest.approx(105.373222, abs=1e-4)
+
+    # Negative and out-of-range seeds are masked cleanly; inverted bounds stay inside [high, low].
+    neg = finish.UniformRandomStream(-42)
+    assert 0.0 <= neg.uniform(0.0, 1.0) <= 1.0
+    inv = finish.UniformRandomStream(7).uniform(10.0, 2.0)
+    assert 2.0 <= inv <= 10.0
+
+
+def test_roll_advances_stream_for_missing_and_equal_bound_variables():
+    # Even when a rolled variable is absent from the container (like Fade's offset),
+    # each listed channel must consume one draw so later variables match the game.
+    step = {
+        "seed": "econ_instance.g_nRandomSeed",
+        "roll": [
+            "econ_instance.g_vAbsent.xy",
+            "econ_instance.g_flEqual.x",
+            "econ_instance.g_flRotation.x",
+        ],
+    }
+    variables = {
+        "econ_instance": {
+            "g_flEqual": [0.0, 0.0, 0.0],
+            "g_flRotation": [0.0, 0.0, 360.0],
+        }
+    }
+    containers = {"econ_instance": {"g_nRandomSeed": 412, "g_flEqual": 0.0, "g_flRotation": 0.0}}
+    finish._roll(step, variables, containers, seed=0)
+    ref = finish.UniformRandomStream(412)
+    for _ in range(3):
+        ref.uniform(0.0, 1.0)
+    expected_rot = ref.uniform(0.0, 360.0)
+    assert containers["econ_instance"]["g_flEqual"] == 0.0
+    assert containers["econ_instance"]["g_flRotation"] == pytest.approx(expected_rot, abs=1e-6)
+
+
+def test_resolve_preserves_input_normal_for_case_hardening_and_patina_age():
+    for switch in ("F_CASE_HARDENING", "F_PATINA_AGE"):
+        lib = library()
+        lib["materials"][PAINT] = {**PAINT_VALUES, switch: 1}
+        values = finish.resolve(lib, KIT, WEAPON_INPUTS, {})
+        assert "g_tNormal" not in values
+        assert values["g_tInputNormal"] == "kit/unused_normal.vtex"
