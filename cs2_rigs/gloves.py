@@ -8,6 +8,7 @@ textures are composed from the game's glove shader inputs, once for each hand.
 
 from __future__ import annotations
 
+import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
@@ -18,6 +19,7 @@ from . import importer, paint
 from .core import catalog as catalog_mod
 from .core import composite
 from .core import gloves as gloves_mod
+from .core import png
 from .core import skins as skins_mod
 from .session import Session, SetupError
 
@@ -68,10 +70,14 @@ def remove_gloves(armature: bpy.types.Object) -> None:
         _show(default, True)
 
 
-def _bring_in(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit) -> bpy.types.Object:
-    """Import the glove model and keep only its third-person mesh, put on the agent's skeleton."""
+def _export_model(session: Session, kit: skins_mod.PaintKit) -> Path:
+    """The glove model converted from the game (cached after the first time). Needs no Blender."""
     item = gloves_mod.glove_item(kit)
-    glb = session.export_model(gloves_mod.model_path(kit), session.cache.model_dir(f"glove/{item}"), [catalog_mod.BASE_CLIP], materials=True)
+    return session.export_model(gloves_mod.model_path(kit), session.cache.model_dir(f"glove/{item}"), [catalog_mod.BASE_CLIP], materials=True)
+
+
+def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object) -> bpy.types.Object:
+    """Import the glove model and keep only its third-person mesh, put on the agent's skeleton."""
     actions_before = set(bpy.data.actions)
     objects = importer._import_glb(context, glb)
     for action in [a for a in bpy.data.actions if a not in actions_before]:
@@ -106,47 +112,116 @@ def _hand_files(session: Session, kit: skins_mod.PaintKit, left: bool, wear: flo
     return files, out_dir / "sheen.png"  # the sheen is only written for a finish with cloth on it
 
 
-def _compose_hands(session: Session, kit: skins_mod.PaintKit, hands: set[bool], wear: float, seed: int) -> dict[bool, dict]:
-    """Image files for each hand's finish (keyed by `left`), composed once and then reused.
+HANDS = (True, False)  # left, right
 
-    The game's textures are read here, then both hands are composed side by
-    side (numpy lets the other run while it works), then saved here.
-    """
-    loaded: dict = {}  # source images, shared by both hands
-    work = {}
-    for left in sorted(hands):
-        files, sheen = _hand_files(session, kit, left, wear, seed)
-        if all(path.is_file() for path in files.values()):
-            continue
-        values = session.glove_values(kit, left, seed, wear)
-        names = gloves_mod.texture_names(values)
-        raw_names = gloves_mod.raw_texture_names(values)
-        for name in names:
-            cache_key = (values[name], name in raw_names)
-            if cache_key not in loaded:
-                loaded[cache_key] = paint._pixels(session.texture(values[name], raw=name in raw_names))
-        work[left] = (values, {name: loaded[(values[name], name in raw_names)] for name in names})
-    if work:
-        with ThreadPoolExecutor(max_workers=len(work), thread_name_prefix="cs2rig-glove") as pool:
-            running = {left: pool.submit(gloves_mod.compose, values, textures, TEXTURE_SIZE, wear) for left, (values, textures) in work.items()}
-            results = {left: job.result() for left, job in running.items()}
-        for left, result in results.items():
+
+def _compose_and_save(session: Session, kit: skins_mod.PaintKit, wear: float, seed: int, work: dict[bool, tuple[dict, dict]]) -> None:
+    """Compose each hand's finish side by side and save its images. Needs no Blender."""
+    if not work:
+        return
+    with ThreadPoolExecutor(max_workers=len(work), thread_name_prefix="cs2rig-glove") as pool:
+        running = {left: pool.submit(gloves_mod.compose, values, textures, TEXTURE_SIZE, wear) for left, (values, textures) in work.items()}
+        for left, job in running.items():
+            result = job.result()
             files, sheen = _hand_files(session, kit, left, wear, seed)
             files["colour"].parent.mkdir(parents=True, exist_ok=True)
-            paint._save(files["colour"], result["colour"], colour=True)
+            png.write(files["colour"], result["colour"])
             # Occlusion, roughness and metalness packed the way the glTF importer wires them.
-            paint._save(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1), colour=False)
-            paint._save(files["normal"], result["normal"], colour=False)
+            png.write(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1))
+            png.write(files["normal"], result["normal"])
             if result["cloth"].max() > 0.0:
                 # Sheen colour (linear) with the cloth mask in alpha.
-                paint._save(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1), colour=False)
-    out = {}
-    for left in hands:
-        files, sheen = _hand_files(session, kit, left, wear, seed)
-        if sheen.is_file():
-            files["sheen"] = sheen
-        out[left] = files
-    return out
+                png.write(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1))
+
+
+class GloveJob:
+    """Gets a glove finish ready, with the slow parts on a worker thread.
+
+    Converting the game's files, composing both hands and saving their images
+    happen off the main thread, so Blender stays usable. The two short steps
+    that need Blender, reading the game's textures and putting the gloves on,
+    run in `step`, which the main thread calls until it returns True.
+    """
+
+    def __init__(self, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0):
+        if not gloves_mod.is_glove_kit(kit):
+            raise SetupError(f"{kit.label} is not a glove finish.")
+        if _default_gloves(armature) is None:
+            raise RuntimeError("This agent has no gloves mesh to replace.")
+        self.session, self.kit, self.seed = session, kit, seed
+        self.wear = min(max(wear, kit.wear_min), kit.wear_max)
+        self.armature_name = armature.name
+        self.stage = "Converting the game's files"
+        self.cancelled = False
+        self._phase = "prepare"
+        self._error: BaseException | None = None
+        self._glb: Path | None = None
+        self._paths: dict[bool, tuple[dict, dict]] = {}  # hand -> (values, {texture name: (file, raw)})
+        self._work: dict[bool, tuple[dict, dict]] = {}  # hand -> (values, {texture name: pixels})
+        self._run(self._prepare)
+
+    def _run(self, work) -> None:
+        def guarded():
+            try:
+                work()
+            except BaseException as exc:  # raised again on the main thread
+                self._error = exc
+        self._thread = threading.Thread(target=guarded, name="cs2rig-gloves", daemon=True)
+        self._thread.start()
+
+    @property
+    def busy(self) -> bool:
+        return self._thread.is_alive()
+
+    def wait(self) -> None:
+        self._thread.join()
+
+    def _prepare(self) -> None:
+        self._glb = _export_model(self.session, self.kit)
+        for left in HANDS:
+            files, _sheen = _hand_files(self.session, self.kit, left, self.wear, self.seed)
+            if all(path.is_file() for path in files.values()):
+                continue
+            values = self.session.glove_values(self.kit, left, self.seed, self.wear)
+            raw_names = gloves_mod.raw_texture_names(values)
+            paths = {}
+            for name in gloves_mod.texture_names(values):
+                raw = name in raw_names
+                paths[name] = (self.session.texture(values[name], raw=raw), raw)
+            self._paths[left] = (values, paths)
+
+    def _read_textures(self) -> None:
+        loaded: dict = {}  # each file read once, shared by both hands
+        for left, (values, paths) in self._paths.items():
+            for key in paths.values():
+                if key not in loaded:
+                    loaded[key] = paint._pixels(key[0])
+            self._work[left] = (values, {name: loaded[key] for name, key in paths.items()})
+        self._paths = {}
+
+    def _compose(self) -> None:
+        _compose_and_save(self.session, self.kit, self.wear, self.seed, self._work)
+        self._work = {}
+
+    def step(self, context: bpy.types.Context) -> bool:
+        """Move the job on from the main thread. True once the gloves are on."""
+        if self.busy:
+            return False
+        if self._error is not None:
+            raise self._error
+        if self.cancelled:
+            return True
+        if self._phase == "prepare":
+            self._read_textures()
+            self._phase, self.stage = "compose", "Composing the finish"
+            self._run(self._compose)
+            return False
+        armature = bpy.data.objects.get(self.armature_name)
+        if armature is None or armature.type != "ARMATURE":
+            raise RuntimeError("The agent was removed before its gloves were ready.")
+        _put_on(context, self.session, armature, self.kit, self._glb, self.wear, self.seed)
+        self._phase = "done"
+        return True
 
 
 def _set_sheen(material: bpy.types.Material, path) -> None:
@@ -192,16 +267,13 @@ def _set_sheen(material: bpy.types.Material, path) -> None:
     tree.links.new(specular.outputs["Value"], shader.inputs["Specular IOR Level"])
 
 
-def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0) -> None:
-    """Dress the agent's hands in a glove finish."""
-    if not gloves_mod.is_glove_kit(kit):
-        raise SetupError(f"{kit.label} is not a glove finish.")
+def _put_on(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, glb: Path, wear: float, seed: int) -> None:
+    """Swap the agent's gloves for the glove model wearing the composed finish."""
     default = _default_gloves(armature)
     if default is None:
         raise RuntimeError("This agent has no gloves mesh to replace.")
-    wear = min(max(wear, kit.wear_min), kit.wear_max)
     remove_gloves(armature)
-    mesh = _bring_in(context, session, armature, kit)
+    mesh = _bring_in(context, glb, armature)
     mesh[GLOVE_PROP] = kit.name
     try:
         # The bare forearm that comes with some gloves keeps its own look.
@@ -210,12 +282,11 @@ def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.typ
             for slot in mesh.material_slots
             if slot.material is not None and (name := paint._game_material(slot.material)).endswith(("_left.vmat", "_right.vmat"))
         }
-        composed = _compose_hands(session, kit, set(hands.values()), wear, seed)  # may take a while the first time
         for material, left in hands.items():
-            files = composed[left]
+            files, sheen = _hand_files(session, kit, left, wear, seed)
             paint.set_images(material, files)
-            if "sheen" in files:
-                _set_sheen(material, files["sheen"])
+            if sheen.is_file():
+                _set_sheen(material, sheen)
             material.name = f"{material.name}.{kit.name}"
     except Exception:
         remove_gloves(armature)
@@ -226,3 +297,9 @@ def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.typ
     mesh[SEED_PROP] = seed
     importer._make_active(context, armature)
 
+
+def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0) -> None:
+    """Dress the agent's hands in a glove finish, waiting for it to be ready."""
+    job = GloveJob(session, armature, kit, wear, seed)
+    while not job.step(context):
+        job.wait()

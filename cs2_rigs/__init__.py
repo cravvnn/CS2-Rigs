@@ -33,6 +33,7 @@ _skin_items: dict[str, list[tuple[str, str, str]]] = {}  # per weapon key
 _glove_items: list[tuple[str, str, str]] = []
 _map_job: maps.BuildJob | None = None
 _preview_job: clip_previews.PreviewJob | None = None
+_glove_job: gloves.GloveJob | None = None
 
 _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
 
@@ -493,21 +494,109 @@ class CS2RIG_OT_remove_skin(_AgentOperator):
 class CS2RIG_OT_apply_gloves(_AgentOperator):
     bl_idname = "cs2rig.apply_gloves"
     bl_label = "Apply Gloves"
-    bl_description = "Put the chosen glove finish on the agent's hands, with the wear and pattern seed set below. Takes a few seconds"
+    bl_description = (
+        "Put the chosen glove finish on the agent's hands, with the wear and pattern seed set below. "
+        "The finish is made in the background the first time, so Blender stays usable"
+    )
 
-    @_reports_errors
-    def execute(self, context):
+    _timer = None
+
+    @classmethod
+    def poll(cls, context):
+        return super().poll(context) and (_glove_job is None or _glove_job.cancelled or not _glove_job.busy)
+
+    def _start(self, context) -> gloves.GloveJob | None:
+        global _glove_job
         wm = context.window_manager
         kit = _kits.get(wm.cs2rig_glove)
         if kit is None:
             self.report({"ERROR"}, "Choose gloves first.")
-            return {"CANCELLED"}
+            return None
         armature = importer.find_agent_armature(context)
-        with importer.working_on(context, armature):
-            gloves.apply_gloves(context, session.get(), armature, kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
-        log_mod.logger.info("gloves %s wear %.2f seed %d", kit.name, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
-        self.report({"INFO"}, f"Applied {gloves_mod.label(kit)}.")
+        _glove_job = gloves.GloveJob(session.get(), armature, kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
+        return _glove_job
+
+    def _finish(self, context, job: gloves.GloveJob) -> set[str]:
+        global _glove_job
+        _glove_job = None
+        if job.cancelled:
+            return {"CANCELLED"}
+        log_mod.logger.info("gloves %s wear %.2f seed %d", job.kit.name, job.wear, job.seed)
+        self.report({"INFO"}, f"Applied {gloves_mod.label(job.kit)}.")
         return {"FINISHED"}
+
+    def _step(self, context, job: gloves.GloveJob) -> bool:
+        armature = bpy.data.objects.get(job.armature_name)
+        if armature is None:
+            return job.step(context)  # reports that the agent is gone
+        with importer.working_on(context, armature):
+            return job.step(context)
+
+    @_reports_errors
+    def execute(self, context):
+        # Used by scripts and background runs: wait for the job.
+        job = self._start(context)
+        if job is None:
+            return {"CANCELLED"}
+        try:
+            while not self._step(context, job):
+                job.wait()
+        except BaseException:
+            global _glove_job
+            _glove_job = None
+            raise
+        return self._finish(context, job)
+
+    def invoke(self, context, event):
+        try:
+            started = self._start(context)
+        except RuntimeError as exc:
+            log_mod.logger.error("apply_gloves failed: %s", exc)
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if started is None:
+            return {"CANCELLED"}
+        self._timer = context.window_manager.event_timer_add(0.25, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        _redraw_panels(context)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        global _glove_job
+        job = _glove_job
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        if job is None or job.cancelled:
+            context.window_manager.event_timer_remove(self._timer)
+            _glove_job = None
+            return {"CANCELLED"}
+        try:
+            done = self._step(context, job)
+        except Exception as exc:
+            context.window_manager.event_timer_remove(self._timer)
+            _glove_job = None
+            log_mod.logger.exception("applying gloves failed")
+            self.report({"ERROR"}, str(exc))
+            _redraw_panels(context)
+            return {"CANCELLED"}
+        _redraw_panels(context)
+        if not done:
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        return self._finish(context, job)
+
+
+def _redraw_panels(context) -> None:
+    for area in context.screen.areas if context.screen else ():
+        if area.type == "VIEW_3D":
+            area.tag_redraw()
+
+
+@bpy.app.handlers.persistent
+def _forget_glove_job(*_args) -> None:
+    """A file being opened ends a glove job: its agent belongs to the file being closed."""
+    if _glove_job is not None:
+        _glove_job.cancelled = True
 
 
 class CS2RIG_OT_remove_gloves(_AgentOperator):
@@ -728,7 +817,10 @@ class CS2RIG_PT_main(bpy.types.Panel):
             row.prop(wm, "cs2rig_glove_wear", slider=True)
             row.prop(wm, "cs2rig_glove_seed")
             row = box.row(align=True)
-            row.operator("cs2rig.apply_gloves", icon="BRUSH_DATA")
+            if _glove_job is not None and not _glove_job.cancelled:
+                row.label(text=f"{_glove_job.stage}...", icon="TIME")
+            else:
+                row.operator("cs2rig.apply_gloves", icon="BRUSH_DATA")
             row.operator("cs2rig.remove_gloves", text="", icon="X")
 
         box = layout.box()
@@ -822,6 +914,8 @@ def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
     clip_browser.register()
+    if _forget_glove_job not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_forget_glove_job)
     _start_log()
     wm = bpy.types.WindowManager
     wm.cs2rig_agent = EnumProperty(name="Agent", items=lambda self, context: _agent_items or _PRESS_REFRESH)
@@ -874,6 +968,9 @@ def register():
 
 def unregister():
     clip_browser.unregister()
+    if _forget_glove_job in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_forget_glove_job)
+    _forget_glove_job()
     wm = bpy.types.WindowManager
     for name in ("cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
