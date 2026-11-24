@@ -195,6 +195,23 @@ def test_hit_testing_and_scrolling():
     assert cb.row_at(lay.list, row, shown, 100, rect.y + rect.h / 2) == 60
 
 
+def test_the_scrollbar_can_be_grabbed_and_dragged_end_to_end():
+    lay = cb.layout(1600, 900, 1.0)
+    row, view = lay.row, lay.list
+    edge = view.right - 3
+    assert cb.hit(lay, edge, view.top - 5, 10, 0, 500, 0) == ("list-bar", -1)
+    assert cb.hit(lay, edge, view.top - 5, 10, 0, 3, 0) == ("list", 0)  # nothing to scroll: the row is hit
+    assert cb.thumb(view, row, 0, 3, 1.0) is None
+    bar = cb.thumb(view, row, 0, 500, 1.0)
+    assert bar.top == pytest.approx(view.top) and bar.right == pytest.approx(view.right)
+    assert cb.scroll_for_thumb(view, row, 500, 1.0, view.top) == 0
+    assert cb.scroll_for_thumb(view, row, 500, 1.0, view.y + bar.h) == pytest.approx(cb.max_scroll(500, row, view))
+    assert cb.scroll_for_thumb(view, row, 500, 1.0, view.y - 900) == pytest.approx(cb.max_scroll(500, row, view))
+    middle = cb.scroll_for_thumb(view, row, 500, 1.0, view.top - (view.h - bar.h) / 2)
+    assert middle == pytest.approx(cb.max_scroll(500, row, view) / 2)
+    assert cb.thumb(view, row, middle, 500, 1.0).top == pytest.approx(view.top - (view.h - bar.h) / 2)
+
+
 def test_layout_stays_clear_of_overlapping_sidebars():
     lay = cb.layout(1600, 900, 1.0, covered=(40, 0, 320, 30))
     assert lay.panel.x >= 40 and lay.panel.right <= 1600 - 320 and lay.panel.top <= 900 - 30

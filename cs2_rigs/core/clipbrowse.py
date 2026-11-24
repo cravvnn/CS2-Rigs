@@ -395,6 +395,29 @@ def clamp_scroll(scroll: float, rows: int, row: float, view: Rect) -> float:
     return min(max(0.0, scroll), max_scroll(rows, row, view))
 
 
+SCROLLBAR_GRAB = 12.0  # how wide, before UI scale, the strip at a column's right edge that grabs its scrollbar
+
+
+def thumb(view: Rect, row: float, scroll: float, rows: int, scale: float) -> Rect | None:
+    """The scrollbar thumb of a column, or None when everything fits."""
+    total = rows * row
+    if total <= view.h:
+        return None
+    h = max(20 * scale, view.h * view.h / total)
+    y = view.top - h - (view.h - h) * scroll / max(1.0, total - view.h)
+    return Rect(view.right - SCROLLBAR_GRAB * scale, y, SCROLLBAR_GRAB * scale, h)
+
+
+def scroll_for_thumb(view: Rect, row: float, rows: int, scale: float, thumb_top: float) -> float:
+    """The scroll that puts the top of a column's thumb at this height."""
+    bar = thumb(view, row, 0.0, rows, scale)
+    if bar is None:
+        return 0.0
+    travel = view.h - bar.h
+    part = (view.top - thumb_top) / travel if travel > 0 else 0.0
+    return clamp_scroll(part * max_scroll(rows, row, view), rows, row, view)
+
+
 def row_at(view: Rect, row: float, scroll: float, rows: int, py: float) -> int:
     """The row under a height in a scrolled column, or -1."""
     index = int((view.top - py + scroll) // row)
@@ -417,11 +440,14 @@ def scroll_to_show(scroll: float, index: int, row: float, view: Rect) -> float:
 
 def hit(lay: Layout, px: float, py: float, tree_rows: int, tree_scroll: float, list_rows: int, list_scroll: float,
         button: bool = False) -> tuple[str, int]:
-    """What is under the mouse: ('tree', row), ('list', row), ('close'|'search'|'button'|'panel'|'outside', -1)."""
+    """What is under the mouse: ('tree', row), ('list', row), ('tree-bar'|'list-bar'|'close'|'search'|'button'|'panel'|'outside', -1)."""
     if not lay.panel.contains(px, py):
         return ("outside", -1)
     if lay.close.contains(px, py):
         return ("close", -1)
+    for name, view, rows, scroll in (("tree", lay.tree, tree_rows, tree_scroll), ("list", lay.list, list_rows, list_scroll)):
+        if view.contains(px, py) and px >= view.right - SCROLLBAR_GRAB * lay.scale and thumb(view, lay.row, scroll, rows, lay.scale):
+            return (f"{name}-bar", -1)
     if lay.tree.contains(px, py):
         index = row_at(lay.tree, lay.row, tree_scroll, tree_rows, py)
         return ("tree", index) if index >= 0 else ("panel", -1)

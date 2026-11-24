@@ -31,34 +31,40 @@ def _hex(value: str, alpha: float = 1.0) -> tuple[float, float, float, float]:
 
 COLORS = {
     "shade": (0.0, 0.0, 0.0, 0.45),
-    "panel": _hex("141a22"),
-    "header": _hex("19202a"),
-    "pane": _hex("0f141b"),
-    "rule": _hex("2a3340"),
-    "hover": _hex("1e2631"),
-    "selected": _hex("26324a"),
-    "field": _hex("0d1218"),
-    "text": _hex("dde3ea"),
-    "dim": _hex("7d8896"),
-    "faint": _hex("4c5664"),
-    "ct": _hex("6d8ccc"),  # CS2 CT blue, lifted a little to read on the dark panel
+    # Greys and the list highlight of Blender's default theme, so the browser sits in with the rest of the UI.
+    "panel": _hex("2b2b2b"),
+    "header": _hex("303030"),
+    "pane": _hex("232323"),
+    "rule": _hex("3d3d3d"),
+    "hover": _hex("383838"),
+    "selected": _hex("334d80"),
+    "field": _hex("1d1d1d"),
+    "badge": _hex("ffffff", 0.06),
+    "bar": _hex("5a5a5a"),
+    "bar-hot": _hex("808080"),
+    "text": _hex("e6e6e6"),
+    "dim": _hex("999999"),
+    "faint": _hex("6e6e6e"),
+    "ct": _hex("6d8ccc"),  # CS2 CT blue, lifted a little to read on the grey panel
     "t": _hex("de9b35"),  # CS2 T gold
     "centre": _hex("f2f4f7"),
     "warn": _hex("e8a33d"),
     "error": _hex("e0684b"),
 }
 SIDE_COLORS = {"L": "ct", "R": "t", "C": "centre"}
+# Muted, so the badges read as notes: most clips are OK, which is shown in plain grey.
 VERDICT_COLORS = {
-    "ok": _hex("57b37f"),
-    "additive": _hex("6d8ccc"),
-    "no-animation": _hex("e0684b"),
-    "collapsed": _hex("e0684b"),
-    "length-mismatch": _hex("de9b35"),
-    "other-skeleton": _hex("8a96a5"),
-    "converter-error": _hex("e0684b"),
-    "timeout": _hex("e0684b"),
-    "unchecked": _hex("6b7585"),
+    "ok": _hex("7a7a7a"),
+    "additive": _hex("8397c0"),
+    "no-animation": _hex("c97a66"),
+    "collapsed": _hex("c97a66"),
+    "length-mismatch": _hex("c4a066"),
+    "other-skeleton": _hex("8a8a8a"),
+    "converter-error": _hex("c97a66"),
+    "timeout": _hex("c97a66"),
+    "unchecked": _hex("7a7a7a"),
 }
+QUIET_VERDICTS = {"ok"}  # shown as plain text, without a pill
 MONO_FONT = "fonts/DejaVuSansMono.woff2"
 FRAME_RATE = 30.0
 PREVIEW_CACHE = 64
@@ -247,6 +253,7 @@ class Browser:
     tree_scroll: float = 0.0
     list_scroll: float = 0.0
     hover: tuple[str, int] = ("outside", -1)
+    dragging: tuple[str, float] | None = None  # the column whose scrollbar is held, and where on its thumb
     focus: int = -1  # list row under the mouse or chosen with the keys
     shown: cb.Clip | None = None  # the clip in the preview; stays after the mouse leaves the list
     message: str = ""
@@ -362,7 +369,7 @@ def _draw_tree(p: Painter, b: Browser, lay: cb.Layout) -> None:
             p.text(x, _baseline(r, size), p.fit(label, size, room), size, colour)
             if b.family and node.key == f"world/{b.family}":
                 p.circle(r.right - 16 * s - number_w, r.y + r.h / 2, 3 * s, COLORS["t"])
-    _scrollbar(p, lay, view, len(b.tree), b.tree_scroll)
+    _scrollbar(p, b, lay, "tree", view, len(b.tree), b.tree_scroll)
 
 
 def _draw_search(p: Painter, b: Browser, lay: cb.Layout, now: float) -> None:
@@ -405,7 +412,7 @@ def _draw_list(p: Painter, b: Browser, lay: cb.Layout) -> None:
             if b.first_folder and clip.folder == b.first_folder:
                 p.rect(cb.Rect(r.x + 2 * s, r.y + 5 * s, 2.5 * s, r.h - 10 * s), COLORS["t"], 1 * s)
             x = r.x + 10 * s
-            right = r.right - 10 * s
+            right = r.right - 16 * s  # clear of the scrollbar
             verdict = cb.verdict(b.status, clip)
             if verdict:
                 right = _badge(p, lay, right, r, verdict) - 8 * s
@@ -416,7 +423,7 @@ def _draw_list(p: Painter, b: Browser, lay: cb.Layout) -> None:
             x += p.width(name, lay.text) + 10 * s
             if where and right - x > 30 * s:
                 p.text(x, _baseline(r, lay.small), p.fit(where, lay.small, right - x), lay.small, COLORS["faint"])
-    _scrollbar(p, lay, view, len(b.visible), b.list_scroll)
+    _scrollbar(p, b, lay, "list", view, len(b.visible), b.list_scroll)
 
 
 def _badge(p: Painter, lay: cb.Layout, right: float, row: cb.Rect, verdict: str) -> float:
@@ -428,19 +435,20 @@ def _badge(p: Painter, lay: cb.Layout, right: float, row: cb.Rect, verdict: str)
     h = round(16 * s)
     r = cb.Rect(right - w, row.y + (row.h - h) / 2, w, h)
     colour = VERDICT_COLORS.get(verdict, COLORS["dim"])
-    p.rect(r, (*colour[:3], 0.16), h / 2)
+    if verdict not in QUIET_VERDICTS:
+        p.rect(r, COLORS["badge"], h / 2)
     p.text(r.x + 6 * s, _baseline(r, size), text, size, colour)
     return r.x
 
 
-def _scrollbar(p: Painter, lay: cb.Layout, view: cb.Rect, rows: int, scroll: float) -> None:
-    total = rows * lay.row
-    if total <= view.h:
+def _scrollbar(p: Painter, b: Browser, lay: cb.Layout, name: str, view: cb.Rect, rows: int, scroll: float) -> None:
+    bar = cb.thumb(view, lay.row, scroll, rows, lay.scale)
+    if bar is None:
         return
     s = lay.scale
-    h = max(20 * s, view.h * view.h / total)
-    y = view.top - h - (view.h - h) * scroll / max(1.0, total - view.h)
-    p.rect(cb.Rect(view.right - 4 * s, y, 3 * s, h), COLORS["faint"], 1.5 * s)
+    hot = b.hover[0] == f"{name}-bar" or (b.dragging is not None and b.dragging[0] == name)
+    w = (6 if hot else 4) * s
+    p.rect(cb.Rect(view.right - w - 1 * s, bar.y, w, bar.h), COLORS["bar-hot" if hot else "bar"], w / 2)
 
 
 def _draw_preview(p: Painter, b: Browser, lay: cb.Layout, now: float) -> None:
@@ -552,7 +560,7 @@ def _draw_footer(p: Painter, b: Browser, lay: cb.Layout) -> None:
     else:
         target = f"Click a clip to load it on {b.agent}" if b.agent else "Select an imported agent to load clips onto"
         p.text(f.x + lay.pad + 4 * s, _baseline(f, lay.small), p.fit(target, lay.small, f.w * 0.5), lay.small, COLORS["dim"])
-    keys = "Up/Down and Enter   Wheel scrolls   Esc or right-click closes"
+    keys = "Up/Down and Enter   Wheel or drag the bar to scroll   Esc or right-click closes"
     p.text(f.right - lay.pad - 4 * s - p.width(keys, lay.small), _baseline(f, lay.small), keys, lay.small, COLORS["faint"])
 
 
@@ -721,6 +729,8 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
     def _handle(self, context, event, browser: Browser, lay: cb.Layout, target: tuple[str, int]):
         kind, index = target
         browser.hover = target
+        if browser.dragging is not None:
+            return self._drag(event, browser, lay)
         if event.type in {"MOUSEMOVE", "INBETWEEN_MOUSEMOVE"}:
             if kind == "list":
                 browser.focus = index
@@ -744,6 +754,15 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             if kind in {"close", "outside"}:
                 close_browser()
                 return {"CANCELLED"}
+            if kind in {"tree-bar", "list-bar"}:
+                name = kind.removesuffix("-bar")
+                view, rows, scroll = self._column(browser, lay, name)
+                bar = cb.thumb(view, lay.row, scroll, rows, lay.scale)
+                y = event.mouse_y - self._region.y
+                # Grab the thumb where it was clicked; a click on the track jumps the thumb's middle there.
+                grab = bar.top - y if bar.y <= y <= bar.top else bar.h / 2
+                browser.dragging = (name, grab)
+                return self._drag(event, browser, lay)
             if kind == "tree":
                 browser.node = index
                 browser.list_scroll = 0.0
@@ -778,6 +797,26 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
         if text and text.isprintable() and not (event.ctrl or event.alt or event.oskey):
             browser.query += text
             self._searched(browser)
+        return {"RUNNING_MODAL"}
+
+    @staticmethod
+    def _column(browser: Browser, lay: cb.Layout, name: str) -> tuple[cb.Rect, int, float]:
+        if name == "tree":
+            return lay.tree, len(browser.tree), browser.tree_scroll
+        return lay.list, len(browser.visible), browser.list_scroll
+
+    def _drag(self, event, browser: Browser, lay: cb.Layout):
+        """Follow the mouse with a held scrollbar until the button is let go."""
+        name, grab = browser.dragging
+        view, rows, _scroll = self._column(browser, lay, name)
+        y = event.mouse_y - self._region.y
+        scroll = cb.scroll_for_thumb(view, lay.row, rows, lay.scale, y + grab)
+        if name == "tree":
+            browser.tree_scroll = scroll
+        else:
+            browser.list_scroll = scroll
+        if event.type == "LEFTMOUSE" and event.value == "RELEASE" or event.type in {"ESC", "RIGHTMOUSE"}:
+            browser.dragging = None
         return {"RUNNING_MODAL"}
 
     @staticmethod
