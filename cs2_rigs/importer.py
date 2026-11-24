@@ -9,6 +9,7 @@ from pathlib import Path
 import bpy
 from mathutils import Matrix
 
+from . import eyes
 from .core import catalog as catalog_mod
 from .core import glb as glb_mod
 from .core.catalog import Agent, Weapon
@@ -126,6 +127,8 @@ def import_agent(context: bpy.types.Context, session: Session, agent: Agent) -> 
             bpy.data.actions.remove(base)
     for bone in armature.pose.bones:
         bone.matrix_basis.identity()
+
+    eyes.rebuild_agent_eyes(session, armature)
 
     _make_active(context, armature)
 

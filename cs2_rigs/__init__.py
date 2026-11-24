@@ -12,7 +12,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, importer, maps, paint, rig, session
+from . import clip_browser, eyes, importer, maps, paint, rig, session
 from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
@@ -293,6 +293,21 @@ class _AgentOperator(bpy.types.Operator):
     @classmethod
     def poll(cls, context):
         return importer.find_agent_armature(context) is not None
+
+
+class CS2RIG_OT_fix_eyes(_AgentOperator):
+    bl_idname = "cs2rig.fix_eyes"
+    bl_label = "Fix Eyes"
+    bl_description = "Rebuild eye materials on the selected agent(s) so irises and pupils appear"
+
+    @_reports_errors
+    def execute(self, context):
+        agents_fixed, materials_rebuilt = eyes.fix_selected_eyes(context, session.get())
+        if materials_rebuilt:
+            self.report({"INFO"}, f"Rebuilt {materials_rebuilt} eye material(s) on {agents_fixed} agent(s).")
+        else:
+            self.report({"INFO"}, "No eye materials found on the selected agent(s).")
+        return {"FINISHED"}
 
 
 class CS2RIG_OT_load_clip(_AgentOperator):
@@ -593,6 +608,7 @@ class CS2RIG_PT_main(bpy.types.Panel):
         box.label(text="Agent")
         box.prop(wm, "cs2rig_agent", text="")
         box.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
+        box.operator("cs2rig.fix_eyes", icon="HIDE_OFF")
         if armature is None:
             box.label(text="Select an imported agent.", icon="INFO")
         else:
@@ -662,6 +678,7 @@ _classes = (
     CS2RIG_OT_clear_cache,
     CS2RIG_OT_refresh,
     CS2RIG_OT_import_agent,
+    CS2RIG_OT_fix_eyes,
     CS2RIG_OT_load_clip,
     CS2RIG_OT_attach_weapon,
     CS2RIG_OT_remove_weapon,
