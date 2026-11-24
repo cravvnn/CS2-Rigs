@@ -1,29 +1,67 @@
+<div align="center">
+
+<img src="docs/hero.jpg" alt="SAS agent reloading an AK-47 | Case Hardened on Ancient, rendered in Cycles">
+
 # CS2 Rigs
 
-A Blender 5.3 add-on that brings Counter-Strike 2 agents and their game animation
-clips into Blender, converted from your own installed game. It works offline and
-never touches the running game.
+**Counter-Strike 2 agents, weapons, finishes and maps in Blender, from your own game install.**
 
-Status: early. It imports an agent with materials, plays third-person game clips
-on it, puts a weapon in its hands with a finish on it, adds animation controls and
-brings in game maps.
+[![Download](https://img.shields.io/badge/Download-Releases-2ea44f?logo=github&logoColor=white)](https://github.com/cravvnn/CS2-Rigs/releases)
+[![Sponsor](https://img.shields.io/badge/Sponsor-db61a2?logo=githubsponsors&logoColor=white)](https://github.com/sponsors/cravvnn)
+[![Report an issue](https://img.shields.io/badge/Report%20an%20issue-6e7781?logo=github&logoColor=white)](https://github.com/cravvnn/CS2-Rigs/issues/new/choose)
 
-![SAS agent running with an AK-47](docs/agent-with-weapon.png)
-## Requirements
+![Platform](https://img.shields.io/badge/platform-Windows%20x64-0078D4)
+![Blender](https://img.shields.io/badge/Blender-5.3-E87D0D?logo=blender&logoColor=white)
+![License](https://img.shields.io/badge/license-MIT-2ea44f)
+[![Latest release](https://img.shields.io/github/v/release/cravvnn/CS2-Rigs?include_prereleases&label=latest%20release&color=orange)](https://github.com/cravvnn/CS2-Rigs/releases)
 
-- Blender 5.3, Windows x64
-- Counter-Strike 2 installed through Steam
-- Source2Viewer-CLI from [Source 2 Viewer](https://github.com/ValveResourceFormat/ValveResourceFormat) (MIT).
-  **Download Converter** in the panel fetches the pinned release (about 65 MB) and
-  checks it against a known SHA-256. To use your own copy, set its path in the
-  add-on preferences or the `CS2RIG_S2V_CLI` environment variable.
+</div>
 
-## Use
+Import any agent with a posable rig, put a weapon in their hands with the finish
+you want, play the game's own animation clips and stand them in a real map. Everything
+is converted from the game files on your disk, offline.
 
-Open the 3D View sidebar (N) > CS2 Rigs. Press **Refresh**, choose an agent and
-press **Import Agent**. With the agent selected, search for a clip and press
-**Load Clip**. The first import of each agent or clip takes about ten seconds while
-it is converted; later loads come from the cache in `%LOCALAPPDATA%\cs2-rigs`.
+**Current release: 0.1.0-alpha · Windows x64 · Blender 5.3.**
+
+> **Alpha.** Expect rough edges and report what breaks. CS2 Rigs only reads the
+> game files on disk. It never opens, injects into or talks to the running game.
+> Not affiliated with or endorsed by Valve.
+
+[Quick start](#quick-start) · [Features](#features) · [Compatibility](#compatibility) ·
+[Known issues](#known-issues) · [Support](#support) · [Credits](#credits)
+
+## Quick start
+
+1. Download `CS2_Rigs_<version>_Windows_x64.zip` from [Releases](https://github.com/cravvnn/CS2-Rigs/releases). Don't unzip it.
+2. Drag the zip into Blender, or use **Edit > Preferences > Get Extensions > Install from Disk**.
+3. In the 3D View press **N** and open the **CS2 Rigs** tab. Press **Download Converter** (about 65 MB, once). Blender's
+   online access must be allowed under **Preferences > System**.
+4. Press **Refresh**. The first time it reads the game's catalogue and finishes, which takes about half a minute.
+5. Choose an agent and press **Import Agent**, then **Hold Weapon**, **Apply Finish**, **Load Clip** and **Add Controls**.
+
+The game is found through Steam. If it is somewhere unusual, set **Game Folder** in the add-on preferences.
+
+| First time | About |
+| --- | --- |
+| Download Converter | 65 MB, once |
+| Refresh | about 30 s, then instant |
+| Import an agent, hold a weapon or load a clip | a few seconds each, then from the cache |
+| Apply a finish | about 10 s, then from the cache |
+| Add a map | 3 to 5 minutes and about 1 GB, then seconds |
+
+## Features
+
+- **Agents.** All agents with their materials, posed by the game's skeleton.
+- **Weapons.** Every weapon and knife, held on the agent's weapon bone so it follows the clip.
+- **Finishes.** Weapon and knife finishes built the way the game builds them, with **Wear** and **Seed**.
+- **Animation clips.** The game's third-person clips, filtered to the held weapon.
+- **Controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
+- **Maps.** Game maps built once into their own file, then linked or copied into your scene.
+
+### Agents and clips
+
+Press **Refresh**, choose an agent and press **Import Agent**. With the agent selected,
+search for a clip and press **Load Clip**.
 
 **Hold Weapon** puts the chosen weapon on the agent's weapon bone, so it follows
 the clip. The clip list then shows only clips made for that kind of weapon; a
@@ -33,13 +71,14 @@ for the Held Weapon** to see every clip.
 Importing an agent sets a scene still on Blender's default 24 fps to 30 fps, the
 rate the game clips are authored at.
 
+![SAS agent running with an AK-47](docs/agent-with-weapon.png)
+
 ### Finishes
 
 With a weapon held, choose a **Finish**, set **Wear** and **Seed**, and press
-**Apply Finish**. The finish is built the way the game builds it, from the
-weapon's own textures, the finish's pattern and colours and the game's wear and
-grime textures, so it wears like it does in the game. The first time takes a
-few seconds; the result is kept in the cache and packed into the .blend.
+**Apply Finish**. The finish is built from the weapon's own textures, the
+finish's pattern and colours and the game's wear and grime textures, so it wears
+like it does in the game. The result is kept in the cache and packed into the .blend.
 
 - **Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
   the range the finish allows.
@@ -48,11 +87,8 @@ few seconds; the result is kept in the cache and packed into the .blend.
 - Older finishes are laid out for the weapon's previous model, so applying one
   switches the weapon to that body.
 
-All weapon and knife finishes can be applied. A few parts are left out and
-named when you apply a finish that has them: overlays, halftone and masked
-spray, case hardening and patina ageing, which some of the newest finishes use. Effects the
-game adds while rendering (pearlescence, glitter, iridescence), stickers and
-glove finishes are not done.
+1,384 of the game's 1,479 weapon and knife finishes can be applied. Parts that are
+not done yet are named when you apply a finish that has them; see [Known issues](#known-issues).
 
 ![AK-47 with the Bloodsport finish](docs/finish.png)
 
@@ -76,6 +112,8 @@ glove finishes are not done.
 Only the controls that currently drive a limb are shown. **Remove Controls** takes
 them off again and leaves the agent as imported.
 
+![IK controls on an agent](docs/ik-controls.png)
+
 ### Maps
 
 Choose a map and press **Add Map**. The first time, the map is converted and built
@@ -84,17 +122,62 @@ map; Blender stays usable meanwhile. After that it is added in seconds. With
 **Link** ticked the scene links to that file and stays small; unticked, the map is
 copied into the scene.
 
-![Dust II from above](docs/map-dust2.png)
-
 Maps come with the game's sun but no baked lighting, so a scene without a world
 gets a plain sky for fill light. Names ending in `_vanity` are the small scenes
 the game shows behind its menus.
 
-### Cache
+![Dust II from above](docs/map-dust2.png)
+
+### Cache and log
 
 Converted files live in `%LOCALAPPDATA%\cs2-rigs\cache`, in one folder per game
 version and converter build. A game update starts a new folder; the add-on
-preferences have buttons to clear old ones or everything.
+preferences have buttons to clear old ones or everything. Converting everything
+takes about 6 GB.
+
+Each step is written to `cs2-rigs.log`, next to the cache by default. **Cache
+Folder** and **Log Folder** in the preferences move them anywhere else, and **Open
+Log Folder** shows the log.
+
+## Compatibility
+
+- Blender 5.3 or newer, Windows x64.
+- Counter-Strike 2 installed through Steam. A game update can change the game
+  files before the converter catches up; if imports start failing after one, report it.
+- Source2Viewer-CLI 21.1 is pinned and checked against its published SHA-256 when
+  downloaded. To use your own copy, set its path in the add-on preferences or the
+  `CS2RIG_S2V_CLI` environment variable.
+
+**Sharing .blend files.** Applied finishes are packed into the .blend, and a map
+that is copied in (Link unticked) is stored in it. Sending such a file to someone
+passes on Valve's assets with it; share renders, or files with linked maps and no finish.
+
+## Known issues
+
+This is an alpha. Not done yet:
+
+- **Glove finishes** (a different game shader) and **stickers**.
+- **Finish parts:** overlays, halftone and masked spray, the case-hardening pass and
+  patina ageing. A finish that uses them is applied without them and the panel says which.
+- **Seed placement** does not match the game's.
+- **Render-time effects** such as pearlescence, glitter and iridescence.
+- **Dual Berettas:** the left pistol does not follow the clip.
+- **Maps** have no baked lighting and cannot be cropped to an area yet.
+- **Controls:** no torso or hip controls; twist bone weights are estimates.
+- **Third person only;** first-person arms are not set up.
+- **Long paths:** Blender cannot open files whose path is over 259 characters. With a
+  long Windows user name or a deep **Cache Folder** some conversions fail with an error
+  saying so; choose a short Cache Folder such as `C:\cs2-rigs`.
+
+## Support
+
+Contact **@Cravvnn on Discord**, or [report an issue](https://github.com/cravvnn/CS2-Rigs/issues/new/choose).
+Include the CS2 Rigs version, what you chose and pressed, and `cs2-rigs.log`
+(**Edit > Preferences > Add-ons > CS2 Rigs > Open Log Folder**).
+
+The log writes your user folder as `~`, but it lists the agents, weapons and maps
+you used; look it over before posting it publicly.
+
 ## Development
 
 `cs2_rigs/core` has no Blender imports and is covered by `tests/` (which need
@@ -113,8 +196,17 @@ finishes and maps. `tools/reopen_check.py` saves and reopens a file with a finis
 catch a wrong icon, property or operator name. `tools/sweep.py` imports every
 agent and holds every weapon, and `tools/finish_sweep.py` reads every finish
 of every weapon and applies one to each; both write a report of what fails.
-Converting everything fills about 6 GB of cache.
+
+Build the add-on zip with Blender:
+
+    blender --command extension build --source-dir cs2_rigs --output-dir dist
+
+## Credits
+
+- Inspired by [deadlockrigs](https://github.com/Sirsyorrz/deadlockrigs).
+- [Source 2 Viewer](https://github.com/ValveResourceFormat/ValveResourceFormat) (MIT), whose command-line converter reads the game files.
+- [Valve](https://www.valvesoftware.com/), for Counter-Strike 2 and Source 2. Game assets are not included and remain Valve's.
 
 ## Licence
 
-MIT. Game assets are not included and remain Valve's.
+MIT. See [LICENSE](LICENSE).

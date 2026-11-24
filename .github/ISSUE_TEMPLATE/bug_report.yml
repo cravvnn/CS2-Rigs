@@ -1,0 +1,55 @@
+name: Bug report
+description: Something in CS2 Rigs failed or looks wrong
+labels: [bug]
+body:
+  - type: markdown
+    attributes:
+      value: |
+        Thanks for testing. The log is the most useful thing you can attach:
+        Edit > Preferences > Add-ons > CS2 Rigs > **Open Log Folder**, then drag `cs2-rigs.log` into the box below.
+        The log writes your user folder as `~`, but look it over before posting; it lists the agents, weapons and maps you used.
+  - type: input
+    id: version
+    attributes:
+      label: CS2 Rigs version
+      description: Shown under Edit > Preferences > Add-ons, and in the first line of the log.
+      placeholder: 0.1.0-alpha
+    validations:
+      required: true
+  - type: input
+    id: blender
+    attributes:
+      label: Blender version
+      placeholder: "5.3.0"
+    validations:
+      required: true
+  - type: dropdown
+    id: area
+    attributes:
+      label: What were you doing?
+      options:
+        - Installing or downloading the converter
+        - Refresh
+        - Importing an agent
+        - Holding a weapon
+        - Applying a finish
+        - Loading a clip
+        - Adding or removing controls
+        - Adding a map
+        - Saving or reopening a file
+        - Something else
+    validations:
+      required: true
+  - type: textarea
+    id: what
+    attributes:
+      label: What happened
+      description: What you chose (agent, weapon, finish with wear and seed, clip, map), what you pressed, what you expected and what you got. Screenshots help for anything that looks wrong.
+    validations:
+      required: true
+  - type: textarea
+    id: log
+    attributes:
+      label: Log
+      description: Attach `cs2-rigs.log`, or paste the lines from around the problem.
+      render: text
