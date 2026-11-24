@@ -1,7 +1,7 @@
 schema_version = "1.0.0"
 
 id = "cs2_rigs"
-version = "0.1.0-alpha"
+version = "0.2.0-alpha"
 name = "CS2 Rigs"
 tagline = "Counter-Strike 2 agents, weapons, finishes and maps for Blender"
 maintainer = "Cravvnn"
