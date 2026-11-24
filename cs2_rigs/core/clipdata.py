@@ -248,14 +248,19 @@ def initial_verdict(info: dict) -> tuple[str, str]:
     return "unchecked", ""
 
 
-def load_status(path: Path) -> dict:
+def read_status(path: Path) -> dict | None:
+    """clip_status.json, or None when it is missing or unreadable."""
     try:
-        data = json.loads(path.read_text(encoding="utf-8"))
-        if data.get("version") == STATUS_VERSION and isinstance(data.get("clips"), dict):
-            return data
+        data = json.loads(Path(path).read_text(encoding="utf-8"))
     except (OSError, ValueError):
-        pass
-    return {"version": STATUS_VERSION, "clips": {}}
+        return None
+    if isinstance(data, dict) and data.get("version") == STATUS_VERSION and isinstance(data.get("clips"), dict):
+        return data
+    return None
+
+
+def load_status(path: Path) -> dict:
+    return read_status(path) or {"version": STATUS_VERSION, "clips": {}}
 
 
 def build_status(census: dict, results: dict[str, dict], previous: dict | None = None) -> dict:
@@ -407,10 +412,10 @@ def write_preview(preview_dir: Path, preview: dict) -> Path:
 
 def read_preview(preview_dir: Path, clip: str) -> dict | None:
     try:
-        data = json.loads((preview_dir / preview_name(clip)).read_text(encoding="utf-8"))
+        data = json.loads((Path(preview_dir) / preview_name(clip)).read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return None
-    return data if data.get("version") == PREVIEW_VERSION else None
+    return data if isinstance(data, dict) and data.get("version") == PREVIEW_VERSION else None
 
 
 def sample_times(duration: float, fps: float = PREVIEW_FPS) -> list[float]:

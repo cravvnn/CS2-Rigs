@@ -15,7 +15,7 @@ from .core import catalog as catalog_mod
 from .core import clipdata
 from .core import glb as glb_mod
 from .core.catalog import Agent, Weapon
-from .session import Session
+from .session import WEAPON_RIG_CLIP, Session
 
 AGENT_KEY_PROP = "cs2rig_agent"
 WEAPON_KEY_PROP = "cs2rig_weapon"
@@ -149,14 +149,24 @@ def held_weapon_objects(armature: bpy.types.Object) -> list[bpy.types.Object]:
     return [obj for obj in armature.children_recursive if obj.get(WEAPON_KEY_PROP) or (obj.parent and obj.parent.get(WEAPON_KEY_PROP))]
 
 
+def held_weapon_root(armature: bpy.types.Object) -> bpy.types.Object | None:
+    """The held weapon's skeleton object, which carries its catalogue key."""
+    return next((obj for obj in armature.children_recursive if WEAPON_KEY_PROP in obj.keys()), None)
+
+
 def held_weapon_key(armature: bpy.types.Object) -> str:
     """The catalogue key of the weapon the agent holds, or '' when its hands are empty."""
-    return next((obj[WEAPON_KEY_PROP] for obj in armature.children_recursive if WEAPON_KEY_PROP in obj.keys()), "")
+    root = held_weapon_root(armature)
+    return root[WEAPON_KEY_PROP] if root is not None else ""
 
 
 def remove_weapon(armature: bpy.types.Object) -> None:
+    key = held_weapon_key(armature)
     for obj in held_weapon_objects(armature):
         bpy.data.objects.remove(obj, do_unlink=True)
+    # Clip actions made for this weapon are of no use to anything else.
+    for action in [a for a in bpy.data.actions if key and a.get(WEAPON_KEY_PROP) == key and a.users == 0]:
+        bpy.data.actions.remove(action)
 
 
 def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.types.Object, weapon: Weapon) -> bpy.types.Object:
@@ -166,7 +176,7 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     agent = session.agent(armature[AGENT_KEY_PROP])
     bone_in_game = _game_rest_matrix(ensure_model_export(session, agent), WEAPON_BONE)
     # The clip list keeps the export small; a weapon without this clip still gets its skeleton.
-    glb = session.export_model(weapon.model_path, session.cache.model_dir(f"weapon/{weapon.key}"), ["dropped"], materials=True)
+    glb = session.export_model(weapon.model_path, session.cache.model_dir(f"weapon/{weapon.key}"), [WEAPON_RIG_CLIP], materials=True)
 
     # The game lines the weapon's own root bone up with the agent's weapon bone,
     # not the weapon model's origin.
@@ -219,6 +229,8 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     )
     root.matrix_basis.identity()
 
+    load_weapon_clip(context, session, armature)
+
     _make_active(context, armature)
 
     return root
@@ -251,11 +263,19 @@ def import_clip_action(context: bpy.types.Context, rig_glb: Path, clip_glb: Path
     The clip's bone tracks are copied into the agent's own export first, so Blender
     builds the action against the same rest pose as the agent in the scene.
     """
+    action = _import_grafted(context, rig_glb, clip_glb, clip, work_dir)
+    if action is None:
+        raise RuntimeError(f"The converter wrote no animation for '{catalog_mod.clip_label(clip)}'.")
+    return action
+
+
+def _import_grafted(context, rig_glb: Path, clip_glb: Path, clip: str, work_dir: Path | None = None, below: str = "") -> bpy.types.Action | None:
+    """The clip's tracks put onto `rig_glb` and imported as an action; None when no bone matched."""
     label = catalog_mod.clip_label(clip)
     grafted = (work_dir or rig_glb.parent) / f"clip-{os.getpid()}.glb"
     try:
-        if not glb_mod.graft_animation(rig_glb, clip_glb, grafted, label):
-            raise RuntimeError(f"The converter wrote no animation for '{label}'.")
+        if not glb_mod.graft_animation(rig_glb, clip_glb, grafted, label, below):
+            return None
         actions_before = set(bpy.data.actions)
         objects = _import_glb(context, grafted)
     finally:
@@ -272,7 +292,7 @@ def import_clip_action(context: bpy.types.Context, rig_glb: Path, clip_glb: Path
         if data.users == 0:
             bpy.data.armatures.remove(data)
     if not new_actions:
-        raise RuntimeError(f"The converter wrote no animation for '{label}'.")
+        return None
     action = max(new_actions, key=lambda a: a.frame_range[1] - a.frame_range[0])
     for other in new_actions:
         if other is not action:
@@ -291,6 +311,7 @@ def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.
         if existing.get(CLIP_KEY_PROP) == clip and existing.get(AGENT_KEY_PROP) == armature[AGENT_KEY_PROP]:
             _assign_action(armature, existing)
             _fit_frame_range(context, existing)
+            load_weapon_clip(context, session, armature)
             return existing
 
     info = session.clip_info(clip)
@@ -309,6 +330,56 @@ def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.
 
     _fit_frame_range(context, action)
 
+    load_weapon_clip(context, session, armature)
+
     _make_active(context, armature)
 
+    return action
+
+
+def _weapon_clip_action(context: bpy.types.Context, session: Session, weapon: Weapon, clip: str) -> bpy.types.Action | None:
+    """The clip's tracks for the weapon's own bones as an action, or None when it has none for this weapon."""
+    for existing in bpy.data.actions:
+        if existing.get(CLIP_KEY_PROP) == clip and existing.get(WEAPON_KEY_PROP) == weapon.key:
+            return existing
+    info = session.clip_info(clip)
+    if not any(catalog_mod.weapon_skeleton_fits(weapon.key, skeleton) for skeleton in info.get("secondary", [])):
+        return None
+    rig = session.weapon_rig_export(weapon)
+    try:
+        root = glb_mod.root_joint_name(glb_mod.read_json(rig), WEAPON_ROOT_BONE)
+    except ValueError:
+        return None
+    clip_glb, _composed = session.export_clip(clip)
+    action = _import_grafted(context, rig, clip_glb, clip, below=root)
+    if action is not None:
+        action.name = f"{catalog_mod.clip_label(clip)} ({weapon.key})"
+        action[WEAPON_KEY_PROP] = weapon.key
+    return action
+
+
+def load_weapon_clip(context: bpy.types.Context, session: Session, armature: bpy.types.Object) -> bpy.types.Action | None:
+    """Play the agent's clip on the held weapon's own bones: slides, bolts, magazines, knife blades.
+
+    The weapon's previous clip comes off first, so a clip with no tracks for this
+    weapon leaves it in its rest pose rather than in the last clip's.
+    """
+    root = held_weapon_root(armature)
+    if root is None or root.type != "ARMATURE":
+        return None
+    if root.animation_data:
+        root.animation_data.action = None
+    for bone in root.pose.bones:
+        bone.matrix_basis.identity()
+    agent_action = armature.animation_data.action if armature.animation_data else None
+    clip = agent_action.get(CLIP_KEY_PROP) if agent_action else None
+    weapon = next((w for w in catalog_mod.catalog_weapons(session.catalog()) if w.key == root[WEAPON_KEY_PROP]), None)
+    if not clip or weapon is None:
+        return None
+    action = _weapon_clip_action(context, session, weapon, clip)
+    if action is not None:
+        # A weapon track may hold one key for the whole clip; keep the clip's length.
+        action.use_frame_range = True
+        action.frame_start, action.frame_end = agent_action.frame_range
+        _assign_action(root, action)
     return action

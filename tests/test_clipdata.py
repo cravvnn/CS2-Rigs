@@ -244,3 +244,34 @@ def test_graft_moves_tracks_onto_the_rig_by_bone_name(tmp_path):
     assert keys == [(0, 0, 0, 1), (0, 0, 0, 1)]
     assert glb.read_floats(document, binary, animation["samplers"][0]["input"]) == [(0.0,), (1.0,)]
     assert json.dumps(document)  # still plain JSON
+
+
+def _weapon_clip(path, clip_rest):
+    """A clip carrying the agent's skeleton and a weapon's: 'weapon' > 'weapon_offset' > 'clip'."""
+    nodes = [
+        {"name": "worldmodel", "children": [1]}, {"name": "wpn"},
+        {"name": "ak47", "children": [3]}, {"name": "weapon", "children": [4]},
+        {"name": "weapon_offset", "children": [5]}, {"name": "clip", "translation": clip_rest},
+    ]
+    channels = [{"sampler": 0, "target": {"node": node, "path": "translation"}} for node in (1, 3, 4, 5)]
+    _glb(path, nodes, {
+        "accessors": [(2, "SCALAR"), (2, "VEC3")],
+        "animation": {"name": "reload", "samplers": [{"input": 0, "output": 1}], "channels": channels},
+    }, [0.0, 1.0] + [0, 0, 0, 0, -0.5, 0])
+
+
+def test_graft_below_copies_only_the_weapons_own_bones(tmp_path):
+    rig, out = tmp_path / "rig.glb", tmp_path / "out.glb"
+    _glb(rig, [{"name": "weapon_rif_ak47", "children": [1]}, {"name": "weapon", "translation": [0, 0.07, 0.07], "children": [2]},
+               {"name": "weapon_offset", "children": [3]}, {"name": "clip", "translation": [0.1, 0.005, -0.12]}, {"name": "wpn"}])
+    same, other = tmp_path / "same.glb", tmp_path / "other.glb"
+    _weapon_clip(same, [0.1, 0.0052, -0.12])
+    _weapon_clip(other, [-0.05, 0.0, -0.11])  # another weapon with a bone of the same name
+    # The root follows the agent's weapon bone, and an agent bone of the same name is not the weapon's.
+    assert glb.graft_animation(rig, same, out, "reload", below="weapon") == 2
+    document, _ = glb.read_glb(out)
+    targets = [document["nodes"][c["target"]["node"]]["name"] for c in document["animations"][0]["channels"]]
+    assert targets == ["weapon_offset", "clip"]
+    assert glb.graft_animation(rig, other, out, "reload", below="weapon") == 0
+    assert glb.graft_animation(rig, same, out, "reload", below="missing") == 0
+    assert glb.graft_animation(rig, same, out, "reload") == 4

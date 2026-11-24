@@ -1,7 +1,8 @@
 """Draw the clip browser into images without a window, to look at its layout and previews.
 
-    blender --background --factory-startup --python tools/clip_browser_check.py -- <out_dir> [data_dir]
+    blender --background --factory-startup --python tools/clip_browser_check.py -- [out_dir] [data_dir]
 
+The images go to out_dir, by default a clip_browser_check folder in the system temp folder.
 data_dir holds clips.json (a list of clip paths), clip_status.json and clip_previews/. Without it,
 the clips come from the installed game and the status and previews from the add-on cache.
 A modal operator cannot run in the background, so this draws the same Browser the operator
@@ -10,6 +11,7 @@ draws, offscreen, at 1080p and 4K sizes, and checks that the operator registers 
 
 import json
 import sys
+import tempfile
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -23,7 +25,7 @@ from cs2_rigs import clip_browser  # noqa: E402
 from cs2_rigs.core import clipbrowse as cb  # noqa: E402
 
 args = sys.argv[sys.argv.index("--") + 1:] if "--" in sys.argv else []
-out_dir = Path(args[0]) if args else Path.cwd() / "clip_browser_check"
+out_dir = Path(args[0]) if args else Path(tempfile.gettempdir()) / "clip_browser_check"
 data_dir = Path(args[1]) if len(args) > 1 else None
 out_dir.mkdir(parents=True, exist_ok=True)
 

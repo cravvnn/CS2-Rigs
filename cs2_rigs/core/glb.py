@@ -144,12 +144,56 @@ def animation_names(document: dict) -> list[str]:
     return [animation.get("name", "") for animation in document.get("animations", [])]
 
 
-def graft_animation(rig: Path, clip: Path, out: Path, name: str) -> int:
+REST_TOLERANCE = 0.001  # metres a bone's rest place may differ between a weapon model and a clip
+
+
+def nodes_below(document: dict, name: str) -> list[int]:
+    """Indices of every node under the first node called `name`, not counting that node."""
+    nodes = document.get("nodes", [])
+    start = next((i for i, node in enumerate(nodes) if node.get("name") == name), None)
+    found, stack = [], list(nodes[start].get("children", [])) if start is not None else []
+    while stack:
+        index = stack.pop()
+        found.append(index)
+        stack.extend(nodes[index].get("children", []))
+    return found
+
+
+def _rest_offset(node: dict) -> list[float]:
+    matrix = local_matrix(node)
+    return [matrix[r][3] for r in range(3)]
+
+
+def bones_below(document: dict, clip_document: dict, root: str) -> set[int]:
+    """The clip's nodes under `root` that the model also has under its own `root`.
+
+    Used for a held weapon: the clip carries the weapon's skeleton next to the agent's.
+    The root itself is left out, since it follows the agent's weapon bone. When a
+    shared bone rests somewhere else on the model, the clip was made for another
+    weapon that happens to use the same bone names, and nothing is returned.
+    """
+    model_nodes = document.get("nodes", [])
+    clip_nodes = clip_document.get("nodes", [])
+    model = {model_nodes[i].get("name", ""): model_nodes[i] for i in nodes_below(document, root)}
+    found = set()
+    for index in nodes_below(clip_document, root):
+        node = clip_nodes[index]
+        own = model.get(node.get("name", ""))
+        if own is None:
+            continue
+        if any(abs(a - b) > REST_TOLERANCE for a, b in zip(_rest_offset(node), _rest_offset(own))):
+            return set()
+        found.add(index)
+    return found
+
+
+def graft_animation(rig: Path, clip: Path, out: Path, name: str, below: str = "") -> int:
     """Write `out`: the rig .glb with its animations replaced by the clip's, matched by bone name.
 
     Animation channels hold each bone's own translation, rotation and scale, so they
     mean the same on any model built on the clip's skeleton. Bones the rig lacks
-    (attachment helpers, a weapon's skeleton) are left out. Returns the channel count.
+    (attachment helpers, a weapon's skeleton) are left out. With `below`, only the
+    bones under that bone are copied (see bones_below). Returns the channel count.
     """
     document, binary = read_glb(rig)
     clip_document, clip_binary = read_glb(clip)
@@ -157,6 +201,7 @@ def graft_animation(rig: Path, clip: Path, out: Path, name: str) -> int:
     for index, node in enumerate(document.get("nodes", [])):
         nodes.setdefault(node.get("name", ""), index)
     clip_nodes = clip_document.get("nodes", [])
+    wanted = bones_below(document, clip_document, below) if below else None
     data = bytearray(binary)
     data += b"\x00" * (-len(data) % 4)
     accessors = document.setdefault("accessors", [])
@@ -187,7 +232,7 @@ def graft_animation(rig: Path, clip: Path, out: Path, name: str) -> int:
         for channel in animation.get("channels", []):
             target = channel.get("target", {})
             node_name = clip_nodes[target["node"]].get("name", "") if "node" in target else ""
-            if node_name not in nodes:
+            if node_name not in nodes or (wanted is not None and target.get("node") not in wanted):
                 continue
             sampler = animation["samplers"][channel["sampler"]]
             rotation = target.get("path") == "rotation"

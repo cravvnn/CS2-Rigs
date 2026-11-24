@@ -163,6 +163,16 @@ def clip_fits(clip: str, weapon: Weapon | None) -> bool:
     return weapon is None or family_of_clip(clip) in (clip_family(weapon), SHARED_CLIP_FAMILY)
 
 
+def weapon_skeleton_fits(weapon_key: str, skeleton_path: str) -> bool:
+    """Whether a clip's weapon skeleton ('animation/skeletons/weapons/galil.vnmskel') is this weapon's.
+
+    Skeletons are named after the weapon, sometimes shortened: galil for galilar,
+    incendiary for incendiarygrenade.
+    """
+    name = skeleton_path.replace("\\", "/").rsplit("/", 1)[-1].split(".", 1)[0]
+    return bool(name) and (weapon_key == name or weapon_key.startswith(name))
+
+
 def clips_for_weapon(clips: list[str], weapon: Weapon | None) -> list[str]:
     """Clips for the held weapon: its own folder first (a karambit's own draw), then its
     family's default clips it does not replace, then the shared ones. Takes full clip paths."""

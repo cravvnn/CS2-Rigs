@@ -223,6 +223,16 @@ def test_clips_are_matched_to_the_held_weapon():
     assert catalog.clip_family(taser) == "pistol"
 
 
+def test_clip_weapon_skeletons_are_matched_to_the_held_weapon():
+    skeleton = "animation/skeletons/weapons/{}.vnmskel".format
+    assert catalog.weapon_skeleton_fits("ak47", skeleton("ak47"))
+    assert catalog.weapon_skeleton_fits("galilar", skeleton("galil"))
+    assert catalog.weapon_skeleton_fits("incendiarygrenade", r"animation\skeletons\weapons\incendiary.vnmskel")
+    assert not catalog.weapon_skeleton_fits("deagle", skeleton("ak47"))
+    assert not catalog.weapon_skeleton_fits("knife_karambit", skeleton("knife_butterfly"))
+    assert not catalog.weapon_skeleton_fits("ak47", "")
+
+
 def test_clip_list_puts_the_held_weapons_own_clips_first():
     world = "animation/anims/world/"
     clips = [world + "rifle/_default_rifle/draw_rifle", world + "rifle/_default_rifle/run_n_rifle",

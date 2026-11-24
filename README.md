@@ -64,7 +64,8 @@ Press **Refresh**, choose an agent and press **Import Agent**. With the agent se
 search for a clip and press **Load Clip**.
 
 **Hold Weapon** puts the chosen weapon on the agent's weapon bone, so it follows
-the clip. The clip list then shows only clips made for that kind of weapon: the
+the clip. A clip made for the held weapon also moves its parts: slides, bolts,
+magazines and knife blades. The clip list then shows only clips made for that kind of weapon: the
 weapon's own clips first (a karambit's own draw), then the default ones it does
 not replace, then the shared deaths, flinches and jumps. A rifle clip leaves a
 knife floating where the rifle would be. Untick **Only Clips for the Held Weapon**
@@ -190,8 +191,9 @@ This is an alpha. Not done yet:
 - **Seed placement** does not match the game's.
 - **Render-time effects** such as pearlescence, glitter and iridescence.
 - **Dual Berettas:** the left pistol does not follow the clip.
-- **Weapon parts in clips:** a clip moves the agent and the weapon bone, not the weapon's
-  own parts, so a knife does not spin open in its draw and slides and magazines stay put.
+- **Weapon parts in clips** move only in clips made for the held weapon: a butterfly
+  knife spins open in its own draw and an AK-47's magazine drops in its own reload, but
+  a clip made for another weapon leaves the parts still. The parts have no controls.
 - **Maps** have no baked lighting and cannot be cropped to an area yet.
 - **Controls:** no torso or hip controls; twist bone weights are estimates.
 - **Third person only;** first-person arms are not set up.

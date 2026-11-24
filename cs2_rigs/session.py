@@ -20,6 +20,7 @@ from .core.steam import GameInstall, find_install
 
 ENV_GAME = "CS2RIG_GAME_DIR"
 ENV_CACHE = "CS2RIG_CACHE_DIR"
+WEAPON_RIG_CLIP = "dropped"  # any clip will do: a weapon exported without one has no skeleton
 
 
 class SetupError(RuntimeError):
@@ -141,6 +142,10 @@ class Session:
     def rig_export(self, agent: catalog_mod.Agent) -> Path:
         """The agent without materials, which clips are put onto before Blender imports them."""
         return self.export_model(agent.model_path, self.cache.clip_dir(agent.key, "rig"), [catalog_mod.BASE_CLIP], materials=False)
+
+    def weapon_rig_export(self, weapon: catalog_mod.Weapon) -> Path:
+        """The weapon without materials, which clips' weapon tracks are put onto."""
+        return self.export_model(weapon.model_path, self.cache.clip_dir(f"weapon/{weapon.key}", "rig"), [WEAPON_RIG_CLIP], materials=False)
 
     def export_clip(self, clip: str) -> tuple[Path, bool]:
         """Convert one clip on its own skeleton. Returns the file and whether it was composed

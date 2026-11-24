@@ -269,7 +269,7 @@ class Browser:
         if clip.path not in self._previews:
             if len(self._previews) >= PREVIEW_CACHE:
                 self._previews.pop(next(iter(self._previews)))
-            found = cb.read_preview(cb.preview_file(self.preview_dir, clip.path)) if self.preview_dir else None
+            found = cb.read_preview(self.preview_dir, clip.path) if self.preview_dir else None
             self._previews[clip.path] = found
         return self._previews[clip.path]
 

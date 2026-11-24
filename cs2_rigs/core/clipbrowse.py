@@ -5,12 +5,11 @@ No Blender imports here; cs2_rigs/clip_browser.py draws what this module works o
 
 from __future__ import annotations
 
-import hashlib
-import json
 import math
 from dataclasses import dataclass, field
 from pathlib import Path
 
+from . import clipdata
 from .catalog import CLIP_PREFIX
 
 # World clip folders in the order the tree lists them.
@@ -209,17 +208,13 @@ def default_node(tree: list[TreeNode], family: str) -> int:
     return 0
 
 
-# Status and previews (see the clip sweep's clip_status.json and clip_previews/).
+# Status and previews (clip_status.json and clip_previews/, see clipdata).
 
 
 def read_status(path: Path) -> dict[str, dict] | None:
     """Clip path -> its record from clip_status.json; None when the clips have not been checked."""
-    try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
-    except (OSError, ValueError):
-        return None
-    clips = data.get("clips") if isinstance(data, dict) else None
-    return clips if isinstance(clips, dict) else None
+    data = clipdata.read_status(path)
+    return data["clips"] if data is not None else None
 
 
 def verdict(status: dict[str, dict] | None, clip: Clip) -> str:
@@ -235,7 +230,7 @@ def badge(verdict_name: str) -> str:
 
 
 def preview_file(preview_dir: Path, clip_path: str) -> Path:
-    return Path(preview_dir) / f"{hashlib.sha1(clip_path.encode('utf-8')).hexdigest()[:16]}.json"
+    return Path(preview_dir) / clipdata.preview_name(clip_path)
 
 
 @dataclass
@@ -270,14 +265,16 @@ class Preview:
         return [tuple(a[j] + (b[j] - a[j]) * blend for j in range(i * 3, i * 3 + 3)) for i in range(count)]
 
 
-def read_preview(path: Path) -> Preview | None:
-    """A skeleton preview, or None when it is missing or does not hold together."""
+def read_preview(preview_dir: Path, clip_path: str) -> Preview | None:
+    """A clip's skeleton preview, or None when it is missing or does not hold together."""
+    data = clipdata.read_preview(preview_dir, clip_path)
+    if data is None:
+        return None
     try:
-        data = json.loads(Path(path).read_text(encoding="utf-8"))
         bones, parents, frames = data["bones"], data["parents"], data["frames"]
         side = data.get("side") or ["C"] * len(bones)
         fps = float(data.get("fps") or 15)
-    except (OSError, ValueError, KeyError, TypeError):
+    except (ValueError, KeyError, TypeError):
         return None
     count = len(bones)
     if not count or len(parents) != count or len(side) != count or not frames or fps <= 0:

@@ -123,21 +123,23 @@ def _preview_data(frames):
 def test_preview_reading_and_blending(tmp_path):
     path = cb.preview_file(tmp_path, PATHS[0])
     assert path.parent == tmp_path and len(path.stem) == 16 and path.suffix == ".json"
-    assert cb.read_preview(path) is None
+    assert cb.read_preview(tmp_path, PATHS[0]) is None
     frames = [[0, 0, 1, 0, 0, 1.5, 0.2, 0, 0], [1, 0, 1, 1, 0, 1.5, 1.2, 0, 0], [2, 0, 1, 2, 0, 1.5, 2.2, 0, 0]]
     path.write_text(json.dumps(_preview_data(frames)))
-    preview = cb.read_preview(path)
+    preview = cb.read_preview(tmp_path, PATHS[0])
     assert preview.duration == pytest.approx(0.2)
     assert preview.root == 0
     assert preview.pose(0.05)[0] == pytest.approx((0.5, 0, 1))
     assert preview.pose(0.25)[0] == pytest.approx((0.5, 0, 1))  # loops
     bad = _preview_data([[0, 0, 1]])
     path.write_text(json.dumps(bad))
-    assert cb.read_preview(path) is None
+    assert cb.read_preview(tmp_path, PATHS[0]) is None
     bad = _preview_data(frames)
     bad["parents"] = [-1, 0, 7]
     path.write_text(json.dumps(bad))
-    assert cb.read_preview(path) is None
+    assert cb.read_preview(tmp_path, PATHS[0]) is None
+    path.write_text("[1, 2]")
+    assert cb.read_preview(tmp_path, PATHS[0]) is None
 
 
 def test_projection_keeps_the_figure_in_the_stage_and_follows_the_root():
