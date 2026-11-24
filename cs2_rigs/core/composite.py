@@ -13,6 +13,8 @@ top, holding the values stored in the file (0..1, not yet linearised).
 from __future__ import annotations
 
 import math
+import os
+from concurrent.futures import ThreadPoolExecutor
 
 import numpy as np
 
@@ -154,22 +156,67 @@ def _wrap(coord, size, mode):
     return np.mod(coord, size)
 
 
-def sample(image, u, v, mode_u=CLAMP, mode_v=CLAMP):
-    """Bilinear lookup of `image` at texture coordinates, v running down."""
-    height, width = image.shape[:2]
-    x = u * width - 0.5
-    y = v * height - 0.5
+_POOL = None
+_SPLIT = 1 << 16  # lookups below this many are done in one go
+_PARTS = 16
+
+
+def _pool() -> ThreadPoolExecutor:
+    global _POOL
+    if _POOL is None:
+        _POOL = ThreadPoolExecutor(max_workers=min(8, os.cpu_count() or 1), thread_name_prefix="cs2rig-sample")
+    return _POOL
+
+
+def _wrap_index(coord, size, mode):
+    if mode == WRAP and size & (size - 1) == 0:
+        return coord & (size - 1)  # the usual power-of-two texture: a mask instead of a modulo
+    return _wrap(coord, size, mode)
+
+
+def _sample_into(out, flat, width, height, x, y, mode_u, mode_v):
     x0 = np.floor(x)
     y0 = np.floor(y)
     fx = (x - x0)[..., None].astype(np.float32)
     fy = (y - y0)[..., None].astype(np.float32)
-    x0 = x0.astype(np.int64)
-    y0 = y0.astype(np.int64)
-    xa, xb = _wrap(x0, width, mode_u), _wrap(x0 + 1, width, mode_u)
-    ya, yb = _wrap(y0, height, mode_v), _wrap(y0 + 1, height, mode_v)
-    top = image[ya, xa] * (1 - fx) + image[ya, xb] * fx
-    bottom = image[yb, xa] * (1 - fx) + image[yb, xb] * fx
-    return top * (1 - fy) + bottom * fy
+    x0 = x0.astype(np.int32)
+    y0 = y0.astype(np.int32)
+    xa, xb = _wrap_index(x0, width, mode_u), _wrap_index(x0 + 1, width, mode_u)
+    ya, yb = _wrap_index(y0, height, mode_v) * width, _wrap_index(y0 + 1, height, mode_v) * width
+    gx = 1 - fx
+    top = np.take(flat, ya + xa, axis=0)
+    top *= gx
+    right = np.take(flat, ya + xb, axis=0)
+    right *= fx
+    top += right
+    bottom = np.take(flat, yb + xa, axis=0)
+    bottom *= gx
+    right = np.take(flat, yb + xb, axis=0)
+    right *= fx
+    bottom += right
+    top *= 1 - fy
+    bottom *= fy
+    np.add(top, bottom, out=out)
+
+
+def sample(image, u, v, mode_u=CLAMP, mode_v=CLAMP):
+    """Bilinear lookup of `image` at texture coordinates, v running down.
+
+    Large lookups are split into bands of rows done side by side: numpy lets
+    other threads run while it gathers and multiplies.
+    """
+    height, width = image.shape[:2]
+    flat = np.ascontiguousarray(image).reshape(height * width, -1)
+    x, y = np.broadcast_arrays(np.asarray(u * width - 0.5), np.asarray(v * height - 0.5))
+    out = np.empty(x.shape + (flat.shape[1],), dtype=np.result_type(flat.dtype, np.float32))
+    if x.ndim == 0 or x.size < _SPLIT:
+        _sample_into(out, flat, width, height, x, y, mode_u, mode_v)
+    else:
+        step = -(-x.shape[0] // _PARTS)
+        bands = [slice(start, start + step) for start in range(0, x.shape[0], step)]
+        for done in [_pool().submit(_sample_into, out[b], flat, width, height, x[b], y[b], mode_u, mode_v) for b in bands]:
+            done.result()
+    return out if image.ndim == 3 else out[..., 0]
 
 
 def fit(image, size):

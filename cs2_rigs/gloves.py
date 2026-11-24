@@ -8,6 +8,9 @@ textures are composed from the game's glove shader inputs, once for each hand.
 
 from __future__ import annotations
 
+from concurrent.futures import ThreadPoolExecutor
+from pathlib import Path
+
 import bpy
 import numpy as np
 
@@ -96,35 +99,54 @@ def _bring_in(context: bpy.types.Context, session: Session, armature: bpy.types.
     return mesh
 
 
-def _compose_hand(session: Session, kit: skins_mod.PaintKit, left: bool, wear: float, seed: int, loaded: dict) -> dict:
-    """Image files for one hand's finish, composed once and then reused."""
-    values = session.glove_values(kit, left, seed, wear)
+def _hand_files(session: Session, kit: skins_mod.PaintKit, left: bool, wear: float, seed: int) -> tuple[dict, Path]:
     key = f"glove|{kit.name}|{'left' if left else 'right'}|{wear:.4f}|{seed}|{TEXTURE_SIZE}|{gloves_mod.VERSION}|{composite.VERSION}"
     out_dir = session.cache.finish_dir(key)
     files = {"colour": out_dir / "colour.png", "surface": out_dir / "surface.png", "normal": out_dir / "normal.png"}
-    sheen = out_dir / "sheen.png"  # only written for a finish with cloth on it
-    if not all(path.is_file() for path in files.values()):
+    return files, out_dir / "sheen.png"  # the sheen is only written for a finish with cloth on it
+
+
+def _compose_hands(session: Session, kit: skins_mod.PaintKit, hands: set[bool], wear: float, seed: int) -> dict[bool, dict]:
+    """Image files for each hand's finish (keyed by `left`), composed once and then reused.
+
+    The game's textures are read here, then both hands are composed side by
+    side (numpy lets the other run while it works), then saved here.
+    """
+    loaded: dict = {}  # source images, shared by both hands
+    work = {}
+    for left in sorted(hands):
+        files, sheen = _hand_files(session, kit, left, wear, seed)
+        if all(path.is_file() for path in files.values()):
+            continue
+        values = session.glove_values(kit, left, seed, wear)
         names = gloves_mod.texture_names(values)
         raw_names = gloves_mod.raw_texture_names(values)
         for name in names:
-            path = values[name]
-            raw = name in raw_names
-            cache_key = (path, raw)
+            cache_key = (values[name], name in raw_names)
             if cache_key not in loaded:
-                loaded[cache_key] = paint._pixels(session.texture(path, raw=raw))
-        textures = {name: loaded[(values[name], name in raw_names)] for name in names}
-        result = gloves_mod.compose(values, textures, TEXTURE_SIZE, wear)
-        out_dir.mkdir(parents=True, exist_ok=True)
-        paint._save(files["colour"], result["colour"], colour=True)
-        # Occlusion, roughness and metalness packed the way the glTF importer wires them.
-        paint._save(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1), colour=False)
-        paint._save(files["normal"], result["normal"], colour=False)
-        if result["cloth"].max() > 0.0:
-            # Sheen colour (linear) with the cloth mask in alpha.
-            paint._save(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1), colour=False)
-    if sheen.is_file():
-        files["sheen"] = sheen
-    return files
+                loaded[cache_key] = paint._pixels(session.texture(values[name], raw=name in raw_names))
+        work[left] = (values, {name: loaded[(values[name], name in raw_names)] for name in names})
+    if work:
+        with ThreadPoolExecutor(max_workers=len(work), thread_name_prefix="cs2rig-glove") as pool:
+            running = {left: pool.submit(gloves_mod.compose, values, textures, TEXTURE_SIZE, wear) for left, (values, textures) in work.items()}
+            results = {left: job.result() for left, job in running.items()}
+        for left, result in results.items():
+            files, sheen = _hand_files(session, kit, left, wear, seed)
+            files["colour"].parent.mkdir(parents=True, exist_ok=True)
+            paint._save(files["colour"], result["colour"], colour=True)
+            # Occlusion, roughness and metalness packed the way the glTF importer wires them.
+            paint._save(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1), colour=False)
+            paint._save(files["normal"], result["normal"], colour=False)
+            if result["cloth"].max() > 0.0:
+                # Sheen colour (linear) with the cloth mask in alpha.
+                paint._save(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1), colour=False)
+    out = {}
+    for left in hands:
+        files, sheen = _hand_files(session, kit, left, wear, seed)
+        if sheen.is_file():
+            files["sheen"] = sheen
+        out[left] = files
+    return out
 
 
 def _set_sheen(material: bpy.types.Material, path) -> None:
@@ -182,13 +204,15 @@ def apply_gloves(context: bpy.types.Context, session: Session, armature: bpy.typ
     mesh = _bring_in(context, session, armature, kit)
     mesh[GLOVE_PROP] = kit.name
     try:
-        loaded: dict = {}  # source images, kept while both hands are composed
-        for slot in mesh.material_slots:
-            material = slot.material
-            name = paint._game_material(material)
-            if not name.endswith(("_left.vmat", "_right.vmat")):
-                continue  # the bare forearm that comes with some gloves keeps its own look
-            files = _compose_hand(session, kit, gloves_mod.is_left(name), wear, seed, loaded)  # may take a while the first time
+        # The bare forearm that comes with some gloves keeps its own look.
+        hands = {
+            slot.material: gloves_mod.is_left(name)
+            for slot in mesh.material_slots
+            if slot.material is not None and (name := paint._game_material(slot.material)).endswith(("_left.vmat", "_right.vmat"))
+        }
+        composed = _compose_hands(session, kit, set(hands.values()), wear, seed)  # may take a while the first time
+        for material, left in hands.items():
+            files = composed[left]
             paint.set_images(material, files)
             if "sheen" in files:
                 _set_sheen(material, files["sheen"])
