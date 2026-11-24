@@ -102,7 +102,7 @@ for expected in ("cs2rig_skin", "cs2rig.apply_skin", '["ik_arm_L"]', "Weapon Fol
 # The preferences draw too.
 prefs = Panel()
 prefs.layout = Layout()
-for name in ("game_dir", "converter_path", "cache_dir"):
+for name in ("game_dir", "converter_path", "cache_dir", "log_dir"):
     setattr(prefs, name, "")
 cs2_rigs.CS2RIG_Preferences.draw(prefs, bpy.context)
 print("PANEL preferences:", len(prefs.layout.drawn), "items")

@@ -3,13 +3,18 @@
 from __future__ import annotations
 
 import functools
+import platform
 import shutil
+import time
+import tomllib
+from pathlib import Path
 
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
 from . import importer, maps, paint, rig, session
 from .core import cache as cache_mod
+from .core import log as log_mod
 from .core import catalog as catalog_mod
 from .core import skins as skins_mod
 from .core.download import CLI_VERSION
@@ -30,17 +35,65 @@ _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first"
 
 
 def _reports_errors(execute):
-    """Show a failed step as an error in Blender instead of a traceback."""
+    """Show a failed step as an error in Blender instead of a traceback, and write each run to the log."""
 
     @functools.wraps(execute)
     def wrapper(self, context):
+        started = time.monotonic()
         try:
-            return execute(self, context)
+            result = execute(self, context)
         except RuntimeError as exc:  # setup, converter, download and import problems
+            log_mod.logger.error("%s failed: %s (%s)", _op_name(self), exc, _selection(context, _op_name(self)))
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
+        except Exception:
+            log_mod.logger.exception("%s stopped with an unexpected error (%s)", _op_name(self), _selection(context, _op_name(self)))
+            raise
+        log_mod.logger.info("%s %s in %.1f s", _op_name(self), ", ".join(sorted(result)).lower(), time.monotonic() - started)
+        return result
 
     return wrapper
+
+
+def _op_name(operator) -> str:
+    """cs2rig.apply_skin rather than the CS2RIG_OT_apply_skin Blender stores once registered."""
+    prefix, _, name = operator.bl_idname.partition("_OT_")
+    return f"{prefix.lower()}.{name}" if name else operator.bl_idname
+
+
+def _selection(context, operator) -> str:
+    """What was chosen in the panel for this step, for the log."""
+    wm = context.window_manager
+    names = ("map",) if "map" in operator else ("agent", "weapon", "skin", "clip")
+    chosen = []
+    for name in names:
+        value = getattr(wm, f"cs2rig_{name}", "")
+        if value and value != "NONE":
+            chosen.append(f"{name} {value}")
+            if name == "skin":
+                chosen.append(f"wear {wm.cs2rig_wear:.2f} seed {wm.cs2rig_seed}")
+    return ", ".join(chosen) or "nothing chosen"
+
+
+def _addon_version() -> str:
+    try:
+        with open(Path(__file__).with_name("blender_manifest.toml"), "rb") as handle:
+            return tomllib.load(handle).get("version", "?")
+    except (OSError, tomllib.TOMLDecodeError):
+        return "?"
+
+
+def _log_dir_setting() -> Path | None:
+    addon = bpy.context.preferences.addons.get(__package__)
+    value = addon.preferences.log_dir if addon else ""
+    return Path(bpy.path.abspath(value)) if value else None
+
+
+def _start_log() -> None:
+    log_mod.configure(_log_dir_setting())
+    log_mod.logger.info(
+        "CS2 Rigs %s, Blender %s, %s %s", _addon_version(), bpy.app.version_string, platform.system(), platform.release()
+    )
 
 
 def _building() -> maps.BuildJob | None:
@@ -96,6 +149,12 @@ class CS2RIG_Preferences(bpy.types.AddonPreferences):
         description="Where converted game files are kept. Leave empty for the default",
         update=lambda self, context: session.reset(),
     )
+    log_dir: StringProperty(
+        name="Log Folder",
+        subtype="DIR_PATH",
+        description=f"Where {log_mod.LOG_NAME} is written. Leave empty for the default, next to the cache",
+        update=lambda self, context: _start_log(),
+    )
 
     def draw(self, context):
         layout = self.layout
@@ -105,6 +164,11 @@ class CS2RIG_Preferences(bpy.types.AddonPreferences):
         row = layout.row()
         row.operator("cs2rig.clear_cache", text="Clear Old Game Versions").everything = False
         row.operator("cs2rig.clear_cache", text="Clear All Converted Files").everything = True
+        layout.prop(self, "log_dir")
+        row = layout.row()
+        row.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
+        log_file = log_mod.current_file()
+        row.label(text=log_mod.private(str(log_file)) if log_file else "The log folder cannot be written.")
 
 
 class CS2RIG_ClipName(bpy.types.PropertyGroup):
@@ -126,6 +190,20 @@ class CS2RIG_OT_download_converter(bpy.types.Operator):
             return {"CANCELLED"}
         session.download_converter()
         self.report({"INFO"}, "The converter is ready.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_open_log_folder(bpy.types.Operator):
+    bl_idname = "cs2rig.open_log_folder"
+    bl_label = "Open Log Folder"
+    bl_description = f"Show the folder with {log_mod.LOG_NAME}, to attach to a bug report"
+
+    def execute(self, context):
+        log_file = log_mod.current_file()
+        if log_file is None:
+            self.report({"ERROR"}, "The log folder cannot be written. Choose another Log Folder.")
+            return {"CANCELLED"}
+        bpy.ops.wm.path_open(filepath=str(log_file.parent))
         return {"FINISHED"}
 
 
@@ -183,6 +261,7 @@ class CS2RIG_OT_refresh(bpy.types.Operator):
         _paintable.update(kit.name for kit in _kits.values() if current.can_apply(kit))
         _skin_items.clear()
         _fill_clips(context)
+        log_mod.logger.info("game files %s, %d finishes can be applied", current.cache.version_dir.name, len(_paintable))
         self.report({"INFO"}, f"Found {len(_agent_items)} agents, {len(_clip_labels)} clips and {len(_maps)} maps.")
         return {"FINISHED"}
 
@@ -296,6 +375,9 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
             return {"CANCELLED"}
         wm = context.window_manager
         missing = paint.apply_skin(context, session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
+        log_mod.logger.info(
+            "finish %s wear %.2f seed %d%s", kit.name, wm.cs2rig_wear, wm.cs2rig_seed, f", without {', '.join(missing)}" if missing else ""
+        )
         if missing:
             self.report({"WARNING"}, f"Applied {kit.label}, without its {' and '.join(missing)}.")
         else:
@@ -445,9 +527,11 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             if library.is_file():
                 return self._add(context, library, game_map)
         except RuntimeError as exc:
+            log_mod.logger.error("%s failed: %s", _op_name(self), exc)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
         _map_job = maps.BuildJob(current, game_map)
+        log_mod.logger.info("building %s", game_map.name)
         self._timer = context.window_manager.event_timer_add(1.0, window=context.window)
         context.window_manager.modal_handler_add(self)
         self.report({"INFO"}, f"Building {game_map.name}. Blender stays usable; this takes a few minutes.")
@@ -464,11 +548,14 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
         job, _map_job = _map_job, None
         context.window_manager.event_timer_remove(self._timer)
         if job.error:
+            log_mod.logger.error("building %s failed: %s", job.game_map.name, job.error)
             self.report({"ERROR"}, job.error)
             return {"CANCELLED"}
+        log_mod.logger.info("built %s", job.game_map.name)
         try:
             return self._add(context, job.library, job.game_map)
         except RuntimeError as exc:
+            log_mod.logger.error("%s failed: %s", _op_name(self), exc)
             self.report({"ERROR"}, str(exc))
             return {"CANCELLED"}
 
@@ -569,6 +656,7 @@ _classes = (
     CS2RIG_Preferences,
     CS2RIG_ClipName,
     CS2RIG_OT_download_converter,
+    CS2RIG_OT_open_log_folder,
     CS2RIG_OT_clear_cache,
     CS2RIG_OT_refresh,
     CS2RIG_OT_import_agent,
@@ -590,6 +678,7 @@ _classes = (
 def register():
     for cls in _classes:
         bpy.utils.register_class(cls)
+    _start_log()
     wm = bpy.types.WindowManager
     wm.cs2rig_agent = EnumProperty(name="Agent", items=lambda self, context: _agent_items or _PRESS_REFRESH)
     wm.cs2rig_weapon = EnumProperty(name="Weapon", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
@@ -631,3 +720,4 @@ def unregister():
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
     session.reset()
+    log_mod.close()
