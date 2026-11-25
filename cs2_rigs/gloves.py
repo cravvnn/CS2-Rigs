@@ -29,6 +29,7 @@ SEED_PROP = "cs2rig_gloves_seed"
 DEFAULT_GLOVES = "thirdperson_default_gloves"  # the agent's own mesh for its hands
 MESH_PART = "worldmodel"  # the third-person mesh of a glove model
 TEXTURE_SIZE = 2048
+EXPORT_WORKERS = 4  # textures converted at once; the converter's staging is per process and thread
 SHEEN_NODE = "CS2Rig Sheen"  # the image node that feeds the cloth sheen
 
 
@@ -114,7 +115,8 @@ def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object)
 
 
 def _hand_files(session: Session, kit: skins_mod.PaintKit, left: bool, wear: float, seed: int) -> tuple[dict, Path]:
-    key = f"glove|{kit.name}|{'left' if left else 'right'}|{wear:.4f}|{seed}|{TEXTURE_SIZE}|{gloves_mod.VERSION}|{composite.VERSION}"
+    wear = round(wear, 3)
+    key = f"glove|{kit.name}|{'left' if left else 'right'}|{wear:.3f}|{seed}|{TEXTURE_SIZE}|{gloves_mod.VERSION}|{composite.VERSION}"
     out_dir = session.cache.finish_dir(key)
     files = {"colour": out_dir / "colour.png", "surface": out_dir / "surface.png", "normal": out_dir / "normal.png"}
     return files, out_dir / "sheen.png"  # the sheen is only written for a finish with cloth on it
@@ -130,6 +132,7 @@ def _compose_and_save(session: Session, kit: skins_mod.PaintKit, wear: float, se
     memory at full size, and composing both at once roughly doubled the peak.
     A hand's images are saved while the next hand is composed.
     """
+    wear = round(wear, 3)
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="cs2rig-glove-save") as saver:
         saving = []
         for left in list(work):
@@ -198,17 +201,27 @@ class GloveJob:
 
     def _prepare(self) -> None:
         self._glb = _export_model(self.session, self.kit)
+        wear = round(self.wear, 3)
+        values_by_hand: dict[bool, dict] = {}
+        pending: dict[tuple[str, bool], None] = {}
         for left in HANDS:
-            files, _sheen = _hand_files(self.session, self.kit, left, self.wear, self.seed)
+            files, _sheen = _hand_files(self.session, self.kit, left, wear, self.seed)
             if all(path.is_file() for path in files.values()):
                 continue
-            values = self.session.glove_values(self.kit, left, self.seed, self.wear)
+            values = self.session.glove_values(self.kit, left, self.seed, wear)
+            values_by_hand[left] = values
             raw_names = gloves_mod.raw_texture_names(values)
-            paths = {}
             for name in gloves_mod.texture_names(values):
-                raw = name in raw_names
-                paths[name] = (self.session.texture(values[name], raw=raw), raw)
-            self._paths[left] = (values, paths)
+                pending[(values[name], name in raw_names)] = None  # each texture converted once for both hands
+        exported: dict[tuple[str, bool], Path] = {}
+        if pending:
+            with ThreadPoolExecutor(max_workers=EXPORT_WORKERS, thread_name_prefix="cs2rig-texture") as pool:
+                futures = {key: pool.submit(self.session.texture, key[0], raw=key[1]) for key in pending}
+                for key, future in futures.items():
+                    exported[key] = future.result()
+        for left, values in values_by_hand.items():
+            raw_names = gloves_mod.raw_texture_names(values)
+            self._paths[left] = (values, {name: (exported[(values[name], name in raw_names)], name in raw_names) for name in gloves_mod.texture_names(values)})
 
     def _read_textures(self) -> None:
         loaded: dict = {}  # each file read once, shared by both hands

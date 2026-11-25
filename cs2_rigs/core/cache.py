@@ -49,6 +49,11 @@ class Cache:
     def finishes_file(self) -> Path:
         return self.version_dir / "finishes.json"
 
+    @property
+    def materials_dir(self) -> Path:
+        """Parsed material values, one small JSON per material."""
+        return self.version_dir / "materials"
+
     def finish_dir(self, key: str) -> Path:
         """Where the textures composed for one finish, weapon body, wear and seed are kept."""
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]

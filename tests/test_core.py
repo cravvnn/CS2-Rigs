@@ -127,6 +127,73 @@ def test_glb_node_world_matrix_follows_parents(tmp_path):
         raise AssertionError("expected KeyError")
 
 
+def test_skeleton_glb_keeps_the_skeleton_and_leaves_meshes_out(tmp_path):
+    import struct
+
+    from core import glb
+
+    nodes = [
+        {"name": "root", "children": [1]},
+        {"name": "spine", "translation": [1.5, 2.5, 3.5]},
+        {"name": "body_mesh", "mesh": 0, "skin": 0},
+    ]
+    document = {
+        "asset": {"version": "2.0", "generator": "test"},
+        "scene": 0,
+        "scenes": [{"nodes": [0, 2]}],
+        "nodes": nodes,
+        "skins": [{"joints": [0, 1], "skeleton": 0, "inverseBindMatrices": 0}],
+        "accessors": [
+            {"bufferView": 0, "componentType": 5126, "count": 2, "type": "MAT4"},
+            {"bufferView": 1, "componentType": 5126, "count": 3, "type": "VEC3"},
+        ],
+        "bufferViews": [
+            {"buffer": 0, "byteOffset": 0, "byteLength": 128},
+            {"buffer": 0, "byteOffset": 128, "byteLength": 36},
+        ],
+        "buffers": [{"byteLength": 164}],
+        "meshes": [{"primitives": [{"attributes": {"POSITION": 1}}]}],
+        "materials": [{"name": "m"}],
+        "textures": [{"source": 0}],
+        "images": [{"uri": "x.png"}],
+        "samplers": [{}],
+        "animations": [{"name": "base", "channels": [], "samplers": []}],
+    }
+    binary = struct.pack("<16f", *range(16)) + struct.pack("<16f", *range(16, 32)) + struct.pack("<3f", 1, 2, 3)
+    source = tmp_path / "full.glb"
+    glb.write_glb(source, document, binary)
+
+    target = glb.strip_to_skeleton(source, tmp_path / "skeleton.glb")
+    stripped, stripped_binary = glb.read_glb(target)
+
+    for key in ("meshes", "materials", "textures", "images", "samplers", "animations"):
+        assert key not in stripped, key
+    assert [node["name"] for node in stripped["nodes"]] == ["root", "spine", "body_mesh"]
+    assert all("mesh" not in node and "skin" not in node for node in stripped["nodes"])
+    assert stripped["nodes"][1]["translation"] == [1.5, 2.5, 3.5]
+    assert stripped["skins"][0]["joints"] == [0, 1]
+    assert glb.root_joint_name(stripped) == "root"
+    assert len(stripped["accessors"]) == 1 and len(stripped["bufferViews"]) == 1
+    values = glb.read_floats(stripped, stripped_binary, stripped["skins"][0]["inverseBindMatrices"])
+    assert [value[0] for value in values] == [0.0, 16.0]
+    assert len(stripped_binary) == 128
+    assert sorted(p.name for p in tmp_path.iterdir()) == ["full.glb", "skeleton.glb"]
+
+
+def test_catalog_can_be_built_from_a_listing_read_once():
+    listing = converter.parse_listing(LISTING)
+
+    class NoConverter:
+        def list_package(self, *args, **kwargs):
+            raise AssertionError("the shared listing must not be read again")
+
+    for entries in (listing, lambda: listing):
+        data = catalog.build_catalog(NoConverter(), Path("pak01_dir.vpk"), entries)
+        assert [agent.key for agent in catalog.catalog_agents(data)] == ["ctm_sas/ctm_sas", "tm_phoenix/tm_phoenix_varianth"]
+        assert [weapon.key for weapon in catalog.catalog_weapons(data)] == []
+        assert len(data["clips"]) == 2
+
+
 def test_weapons_list_only_holdable_models():
     listing = converter.parse_listing(
         "weapons/models/ak47/weapon_rif_ak47.vmdl_c CRC:00 size:1\n"

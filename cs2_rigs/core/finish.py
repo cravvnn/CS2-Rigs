@@ -8,14 +8,20 @@ shader values the compositor needs. No Blender imports here.
 
 from __future__ import annotations
 
+import functools
+import hashlib
 import json
+import os
 import re
 import struct
+import threading
+from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
 from .converter import Converter
 
 LIBRARY_VERSION = 2
+MATERIAL_VERSION = 1  # the shape of a cached material's values
 PAINT_MATERIALS = "materials/models/weapons/customization/paints/vmats/"
 TEMPLATE_MATERIALS = "workshop/paintkits/templates/"
 RECIPES = "weapons/paints/"
@@ -99,18 +105,13 @@ _TOKEN = re.compile(
 def parse_kv3(text: str):
     """Parse the text form of KeyValues3 the converter prints into dicts, lists and scalars."""
     tokens = []
-    position = 0
-    text = text.strip()
-    while position < len(text):
-        match = _TOKEN.match(text, position)
-        if not match or match.end() == position:
-            raise ValueError(f"unreadable KeyValues3 text at offset {position}")
-        position = match.end()
-        if match.group("blob") is not None:
+    for match in _TOKEN.finditer(text):
+        kind = match.lastgroup
+        if kind == "blob":
             tokens.append(("value", None))
-        elif match.group("punct"):
+        elif kind == "punct":
             tokens.append((match.group("punct"), None))
-        elif match.group("string") is not None:
+        elif kind == "string":
             tokens.append(("value", match.group("string").replace('\\"', '"').replace("\\\\", "\\")))
         else:
             tokens.append(("value", _scalar(match.group("word"))))
@@ -148,6 +149,7 @@ def parse_kv3(text: str):
     return parsed
 
 
+@functools.lru_cache(maxsize=8192)
 def _scalar(word: str):
     if word in ("true", "false"):
         return word == "true"
@@ -191,6 +193,42 @@ def material_values(data: dict) -> dict:
             value = entry.get(field)
             values[entry["m_name"]] = tuple(value) if isinstance(value, list) else value
     return values
+
+
+def material_cache_file(folder: Path, path: str) -> Path:
+    """Where one material's parsed values are kept, named by its package path."""
+    digest = hashlib.sha1(path.encode("utf-8")).hexdigest()[:16]
+    return Path(folder) / f"{digest}.json"
+
+
+def _tuples(value):
+    """JSON turns tuples into lists; the values keep the form `material_values` returns."""
+    if isinstance(value, list):
+        return tuple(_tuples(item) for item in value)
+    return value
+
+
+def read_material(folder: Path, path: str) -> dict | None:
+    """A material's values from the cache, or None when they are not there or were written otherwise."""
+    try:
+        data = json.loads(material_cache_file(folder, path).read_text(encoding="utf-8"))
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict) or data.get("version") != MATERIAL_VERSION or data.get("path") != path:
+        return None
+    values = data.get("values")
+    if not isinstance(values, dict):
+        return None
+    return {name: _tuples(value) for name, value in values.items()}
+
+
+def store_material(folder: Path, path: str, values: dict) -> None:
+    """Keep one material's parsed values, replacing the file only once it is complete."""
+    target = material_cache_file(folder, path)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    partial.write_text(json.dumps({"version": MATERIAL_VERSION, "path": path, "values": values}), encoding="utf-8")
+    partial.replace(target)
 
 
 def _variable(entry: dict):
@@ -276,15 +314,26 @@ def recipe(data: dict) -> dict:
     return out
 
 
+def _folder_dumps(converter: Converter, package: Path, folders, extension: str) -> list[str]:
+    """The converter's data block for each folder, read in a few processes at once."""
+
+    def dump(folder: str) -> str:
+        return converter.dump_folder(package, folder, extension)
+
+    with ThreadPoolExecutor(max_workers=4, thread_name_prefix="cs2rig-dump") as pool:
+        return list(pool.map(dump, folders))
+
+
 def build_library(converter: Converter, package: Path) -> dict:
     """Every weapon and glove paint material and recipe in the game, read in a few converter runs."""
     materials = {}
-    for folder in (PAINT_MATERIALS, TEMPLATE_MATERIALS, *GLOVE_MATERIALS):
-        for path, data in split_dump(converter.dump_folder(package, folder, "vmat_c")).items():
+    material_folders = (PAINT_MATERIALS, TEMPLATE_MATERIALS, *GLOVE_MATERIALS)
+    for text in _folder_dumps(converter, package, material_folders, "vmat_c"):
+        for path, data in split_dump(text).items():
             materials[path] = material_values(data)
     recipes = {}
-    for folder in (RECIPES, GLOVE_RECIPES):
-        recipes.update({path: recipe(data) for path, data in split_dump(converter.dump_folder(package, folder, "vcompmat_c")).items()})
+    for text in _folder_dumps(converter, package, (RECIPES, GLOVE_RECIPES), "vcompmat_c"):
+        recipes.update({path: recipe(data) for path, data in split_dump(text).items()})
     return {"version": LIBRARY_VERSION, "materials": materials, "recipes": recipes}
 
 

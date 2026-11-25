@@ -8,7 +8,9 @@ All matrices are 4x4 row-major nested lists in glTF space (Y up).
 from __future__ import annotations
 
 import json
+import os
 import struct
+import threading
 from pathlib import Path
 
 Matrix4 = list[list[float]]
@@ -112,6 +114,75 @@ def write_glb(path: Path, document: dict, binary: bytes) -> None:
     if binary:
         chunks += struct.pack("<I4s", len(binary), b"BIN\x00") + binary
     Path(path).write_bytes(struct.pack("<4sII", b"glTF", 2, 12 + len(chunks)) + chunks)
+
+
+_SKELETON_DROP = ("mesh", "skin", "weights")
+
+
+def strip_to_skeleton(source: Path, target: Path) -> Path:
+    """Write `target`: `source` with only its skeleton, for putting clips onto.
+
+    Meshes, materials, textures and animations are left out, and the binary keeps
+    only the skin's inverse bind matrices. Nodes, joint lists and rest transforms
+    stay as they are, so the imported skeleton and every action built on it are
+    the same as from the full file.
+    """
+    document, binary = read_glb(source)
+    skins = document.get("skins", [])
+    if not skins:
+        raise ValueError(f"{Path(source).name} has no skeleton.")
+    accessors, views, data = [], [], bytearray()
+    view_map: dict[int, int] = {}
+    accessor_map: dict[int, int] = {}
+
+    def keep_view(index: int) -> int:
+        if index not in view_map:
+            view = document["bufferViews"][index]
+            start = view.get("byteOffset", 0)
+            data.extend(b"\x00" * (-len(data) % 4))
+            kept = dict(view)
+            kept["buffer"] = 0
+            kept["byteOffset"] = len(data)
+            data.extend(binary[start:start + view["byteLength"]])
+            views.append(kept)
+            view_map[index] = len(views) - 1
+        return view_map[index]
+
+    def keep_accessor(index: int) -> int:
+        if index not in accessor_map:
+            kept = dict(document["accessors"][index])
+            if "bufferView" in kept:
+                kept["bufferView"] = keep_view(kept["bufferView"])
+            for part in (kept.get("sparse") or {}).values():
+                if isinstance(part, dict) and "bufferView" in part:
+                    part["bufferView"] = keep_view(part["bufferView"])
+            accessors.append(kept)
+            accessor_map[index] = len(accessors) - 1
+        return accessor_map[index]
+
+    out_skins = []
+    for skin in skins:
+        kept = dict(skin)
+        if "inverseBindMatrices" in kept:
+            kept["inverseBindMatrices"] = keep_accessor(kept["inverseBindMatrices"])
+        out_skins.append(kept)
+    nodes = [{key: value for key, value in node.items() if key not in _SKELETON_DROP} for node in document.get("nodes", [])]
+    stripped = {
+        "asset": document.get("asset") or {"version": "2.0"},
+        "scene": document.get("scene", 0),
+        "scenes": document.get("scenes", []),
+        "nodes": nodes,
+        "skins": out_skins,
+        "accessors": accessors,
+        "bufferViews": views,
+        "buffers": [{"byteLength": len(data)}] if data else [],
+    }
+    target = Path(target)
+    target.parent.mkdir(parents=True, exist_ok=True)
+    partial = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
+    write_glb(partial, stripped, bytes(data))
+    partial.replace(target)
+    return target
 
 
 def read_floats(document: dict, binary: bytes, accessor_index: int) -> list[tuple[float, ...]]:

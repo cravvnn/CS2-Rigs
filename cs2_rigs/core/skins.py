@@ -8,6 +8,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from .catalog import package_entries
 from .converter import Converter
 
 DEFAULT_WEAR_MIN = 0.06
@@ -251,8 +252,12 @@ def from_json(data: list[dict]) -> list[PaintKit]:
     return [PaintKit(**{**row, "weapons": tuple(row.get("weapons", ()))}) for row in data]
 
 
-def load_or_build_catalogue(converter: Converter, package: Path, cache_file: Path) -> list[PaintKit]:
-    """Every paint kit in the installed game, read once and then kept in `cache_file`."""
+def load_or_build_catalogue(converter: Converter, package: Path, cache_file: Path, entries=None) -> list[PaintKit]:
+    """Every paint kit in the installed game, read once and then kept in `cache_file`.
+
+    `entries` may be the package's listing, or a function that reads it, so the
+    listing can be shared with the catalogue.
+    """
     try:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("version") == CATALOGUE_VERSION:
@@ -262,7 +267,7 @@ def load_or_build_catalogue(converter: Converter, package: Path, cache_file: Pat
     with tempfile.TemporaryDirectory() as work_dir:
         items_game = parse_keyvalues(converter.read_text(package, ITEMS_GAME, Path(work_dir)))
         english = parse_localisation(converter.read_text(package, ENGLISH, Path(work_dir)))
-    icons = [entry.path for entry in converter.list_package(package, ICON_FOLDER, "vtex_c")]
+    icons = [entry.path for entry in package_entries(converter, package, entries)]
     kits = paint_kits(items_game, english, icons)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_file.with_suffix(".tmp")

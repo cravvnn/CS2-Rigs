@@ -13,10 +13,11 @@ from .core import catalog as catalog_mod
 from .core import clipdata
 from .core import download
 from .core import finish as finish_mod
+from .core import glb as glb_mod
 from .core import gloves as gloves_mod
 from .core import skins as skins_mod
 from .core.cache import Cache, default_cache_root
-from .core.converter import CLI_NAME, Converter, find_cli
+from .core.converter import CLI_NAME, Converter, exported_path, find_cli
 from .core.steam import GameInstall, find_install
 
 ENV_GAME = "CS2RIG_GAME_DIR"
@@ -42,18 +43,33 @@ class Session:
     _finishes: dict | None = None
     _materials: dict = field(default_factory=dict)
     _clip_info: dict = field(default_factory=dict)
+    _listing: list | None = None
+
+    def entries(self) -> list:
+        """The package's file listing, read once and shared by the lists that need it."""
+        if self._listing is None:
+            self._listing = self.converter.list_package(self.install.main_package)
+        return self._listing
+
+    def _done_with_listing(self) -> None:
+        if self._catalog is not None and self._skins is not None:
+            self._listing = None  # the lists are built; the listing is large
 
     def catalog(self) -> dict:
         if self._catalog is None:
             self._catalog = catalog_mod.load_or_build_catalog(
-                self.converter, self.install.main_package, self.cache.catalog_file
+                self.converter, self.install.main_package, self.cache.catalog_file, self.entries
             )
+            self._done_with_listing()
         return self._catalog
 
     def skins(self) -> list[skins_mod.PaintKit]:
         """Every weapon, knife and glove finish in the game."""
         if self._skins is None:
-            self._skins = skins_mod.load_or_build_catalogue(self.converter, self.install.main_package, self.cache.skins_file)
+            self._skins = skins_mod.load_or_build_catalogue(
+                self.converter, self.install.main_package, self.cache.skins_file, self.entries
+            )
+            self._done_with_listing()
         return self._skins
 
     def finishes(self) -> dict:
@@ -80,10 +96,17 @@ class Session:
         """The values of one material in the game package, by name."""
         path = path.replace("\\", "/").removesuffix("_c")
         if path not in self._materials:
-            dump = finish_mod.split_dump(self.converter.dump(self.install.main_package, path + "_c"))
-            if path not in dump:
-                raise SetupError(f"The material '{path}' is not in the game files.")
-            self._materials[path] = finish_mod.material_values(dump[path])
+            values = finish_mod.read_material(self.cache.materials_dir, path)
+            if values is None:
+                dump = finish_mod.split_dump(self.converter.dump(self.install.main_package, path + "_c"))
+                if path not in dump:
+                    raise SetupError(f"The material '{path}' is not in the game files.")
+                values = finish_mod.material_values(dump[path])
+                try:
+                    finish_mod.store_material(self.cache.materials_dir, path, values)
+                except OSError:
+                    pass  # the cache only makes later sessions faster
+            self._materials[path] = values
         return self._materials[path]
 
     def finish_values(self, kit: skins_mod.PaintKit, body_material: str, seed: int, wear: float) -> dict:
@@ -150,12 +173,28 @@ class Session:
         return census
 
     def rig_export(self, agent: catalog_mod.Agent) -> Path:
-        """The agent without materials, which clips are put onto before Blender imports them."""
-        return self.export_model(agent.model_path, self.cache.clip_dir(agent.key, "rig"), [catalog_mod.BASE_CLIP], materials=False)
+        """The agent's skeleton only, which clips are put onto before Blender imports them.
+
+        Made by stripping the model this agent was imported from, so a clip needs
+        no converter run; a model that was never imported is exported once first.
+        """
+        out_dir = self.cache.clip_dir(agent.key, "rig")
+        target = out_dir / "skeleton.glb"
+        model = exported_path(self.cache.model_dir(agent.key), agent.model_path)
+        if model.is_file():
+            return glb_mod.strip_to_skeleton(model, target)
+        rig = self.export_model(agent.model_path, out_dir, [catalog_mod.BASE_CLIP], materials=False)
+        return glb_mod.strip_to_skeleton(rig, target)
 
     def weapon_rig_export(self, weapon: catalog_mod.Weapon) -> Path:
-        """The weapon without materials, which clips' weapon tracks are put onto."""
-        return self.export_model(weapon.model_path, self.cache.clip_dir(f"weapon/{weapon.key}", "rig"), [WEAPON_RIG_CLIP], materials=False)
+        """The weapon's skeleton only, which clips' weapon tracks are put onto."""
+        out_dir = self.cache.clip_dir(f"weapon/{weapon.key}", "rig")
+        target = out_dir / "skeleton.glb"
+        model = exported_path(self.cache.model_dir(f"weapon/{weapon.key}"), weapon.model_path)
+        if model.is_file():
+            return glb_mod.strip_to_skeleton(model, target)
+        rig = self.export_model(weapon.model_path, out_dir, [WEAPON_RIG_CLIP], materials=False)
+        return glb_mod.strip_to_skeleton(rig, target)
 
     def export_clip(self, clip: str) -> tuple[Path, bool]:
         """Convert one clip on its own skeleton. Returns the file and whether it was composed

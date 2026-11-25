@@ -386,3 +386,22 @@ def test_resolve_preserves_input_normal_for_case_hardening_and_patina_age():
         values = finish.resolve(lib, KIT, WEAPON_INPUTS, {})
         assert "g_tNormal" not in values
         assert values["g_tInputNormal"] == "kit/unused_normal.vtex"
+
+
+def test_material_values_are_kept_on_disk_and_read_back(tmp_path):
+    path = "materials/models/weapons/customization/paints/vmats/hy_test.vmat"
+    values = {
+        "F_PAINT_STYLE": 6,
+        "g_flPaintRoughness": 0.4,
+        "g_vColor0": (0.1, 0.2, 0.3, 1.0),
+        "nested": ((1, 2), ("a",)),
+    }
+    finish.store_material(tmp_path, path, values)
+    assert finish.read_material(tmp_path, path) == values
+    assert finish.read_material(tmp_path, path + "_other") is None
+    assert [p.name for p in tmp_path.iterdir()] == [finish.material_cache_file(tmp_path, path).name]
+    # A file written by another version is ignored rather than trusted.
+    finish.material_cache_file(tmp_path, path).write_text(
+        '{"version": 0, "path": "%s", "values": {}}' % path, encoding="utf-8"
+    )
+    assert finish.read_material(tmp_path, path) is None

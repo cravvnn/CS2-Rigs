@@ -27,7 +27,15 @@ def work_dir(session: Session) -> Path:
 def clips_to_build(session: Session, census: dict) -> list[str]:
     """Agent clips without a preview yet, gameplay clips first."""
     preview_dir = session.cache.clip_preview_dir()
-    return [clip for clip in cliprun.agent_clips(census) if clipdata.read_preview(preview_dir, clip) is None]
+    made = set()
+    if preview_dir.is_dir():
+        for path in preview_dir.glob("*.json"):
+            try:
+                if path.stat().st_size:
+                    made.add(path.name)
+            except OSError:
+                continue  # deleted while listing; treat it as missing
+    return [clip for clip in cliprun.agent_clips(census) if clipdata.preview_name(clip) not in made]
 
 
 def write_status(session: Session, census: dict) -> dict:

@@ -98,10 +98,24 @@ def clips_from_entries(entries: list[PackageEntry]) -> list[str]:
     return sorted(clips)
 
 
-def build_catalog(converter: Converter, package: Path) -> dict:
-    agents = agents_from_entries(converter.list_package(package, AGENT_PREFIX, "vmdl_c"))
-    clips = clips_from_entries(converter.list_package(package, CLIP_PREFIX, "vnmclip_c"))
-    weapons = weapons_from_entries(converter.list_package(package, WEAPON_PREFIX, "vmdl_c"))
+def package_entries(converter: Converter, package: Path, entries=None) -> list[PackageEntry]:
+    """The package's file listing, read once and shared by the lists that need it.
+
+    `entries` may be the listing itself or a function that reads it, so a cached
+    list costs no converter run.
+    """
+    if callable(entries):
+        return entries()
+    if entries is not None:
+        return entries
+    return converter.list_package(package)
+
+
+def build_catalog(converter: Converter, package: Path, entries=None) -> dict:
+    entries = package_entries(converter, package, entries)
+    agents = agents_from_entries(entries)
+    clips = clips_from_entries(entries)
+    weapons = weapons_from_entries(entries)
     return {
         "version": CATALOG_VERSION,
         "agents": [asdict(a) for a in agents],
@@ -110,14 +124,14 @@ def build_catalog(converter: Converter, package: Path) -> dict:
     }
 
 
-def load_or_build_catalog(converter: Converter, package: Path, cache_file: Path) -> dict:
+def load_or_build_catalog(converter: Converter, package: Path, cache_file: Path, entries=None) -> dict:
     try:
         data = json.loads(cache_file.read_text(encoding="utf-8"))
         if data.get("version") == CATALOG_VERSION:
             return data
     except (OSError, ValueError):
         pass
-    data = build_catalog(converter, package)
+    data = build_catalog(converter, package, entries)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
     tmp = cache_file.with_suffix(".tmp")
     tmp.write_text(json.dumps(data), encoding="utf-8")

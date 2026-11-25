@@ -34,6 +34,7 @@ _glove_items: list[tuple[str, str, str]] = []
 _map_job: maps.BuildJob | None = None
 _preview_job: clip_previews.PreviewJob | None = None
 _glove_job: gloves.GloveJob | None = None
+_finish_job: paint.FinishJob | None = None
 
 _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
 
@@ -389,6 +390,9 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
         if _glove_job is not None and _glove_job.busy:
             self.report({"ERROR"}, "Gloves are being made. Wait for them to finish.")
             return {"CANCELLED"}
+        if _finish_job is not None and _finish_job.busy:
+            self.report({"ERROR"}, "A finish is being made. Wait for it to finish.")
+            return {"CANCELLED"}
         cache = session.get().cache
         if self.everything:
             targets, kept = cache.stale_dirs() + ([cache.version_dir] if cache.version_dir.is_dir() else []), []
@@ -619,30 +623,101 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
     bl_label = "Apply Finish"
     bl_description = "Put the chosen finish on the held weapon, with the wear and seed above. About ten seconds the first time"
 
+    _timer = None
+
     @classmethod
     def poll(cls, context):
         if not _kits:
             cls.poll_message_set(_NEEDS_REFRESH)
             return False
         armature = importer.find_agent_armature(context)
-        return armature is not None and bool(importer.held_weapon_key(armature))
+        # A job cancelled by opening a file may still be finishing on its thread.
+        return armature is not None and bool(importer.held_weapon_key(armature)) and (_finish_job is None or not _finish_job.busy)
+
+    def _start(self, context) -> paint.FinishJob | None:
+        global _finish_job
+        wm = context.window_manager
+        kit = _kits.get(wm.cs2rig_skin)
+        if kit is None:
+            self.report({"ERROR"}, "Choose a finish first.")
+            return None
+        _finish_job = paint.FinishJob(session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
+        return _finish_job
+
+    def _finish(self, context, job: paint.FinishJob) -> set[str]:
+        global _finish_job
+        _finish_job = None
+        if job.cancelled:
+            return {"CANCELLED"}
+        log_mod.logger.info(
+            "finish %s wear %.3f seed %d%s",
+            job.kit.name, job.wear, job.seed, f", without {', '.join(job.missing)}" if job.missing else "",
+        )
+        if job.missing:
+            self.report({"WARNING"}, f"Applied {job.kit.label}, without its {' and '.join(job.missing)}.")
+        else:
+            self.report({"INFO"}, f"Applied {job.kit.label}.")
+        return {"FINISHED"}
+
+    def _step(self, context, job: paint.FinishJob) -> bool:
+        armature = bpy.data.objects.get(job.armature_name)
+        if armature is None:
+            return job.step(context)  # reports that the agent is gone
+        with importer.working_on(context, armature):
+            return job.step(context)
 
     @_reports_errors
     def execute(self, context):
-        kit = _kits.get(context.window_manager.cs2rig_skin)
-        if kit is None:
-            self.report({"ERROR"}, "Choose a finish first.")
+        # Used by scripts and background runs: wait for the job.
+        job = self._start(context)
+        if job is None:
             return {"CANCELLED"}
-        wm = context.window_manager
-        missing = paint.apply_skin(context, session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
-        log_mod.logger.info(
-            "finish %s wear %.2f seed %d%s", kit.name, wm.cs2rig_wear, wm.cs2rig_seed, f", without {', '.join(missing)}" if missing else ""
-        )
-        if missing:
-            self.report({"WARNING"}, f"Applied {kit.label}, without its {' and '.join(missing)}.")
-        else:
-            self.report({"INFO"}, f"Applied {kit.label}.")
-        return {"FINISHED"}
+        try:
+            while not self._step(context, job):
+                job.wait()
+        except BaseException:
+            global _finish_job
+            _finish_job = None
+            raise
+        return self._finish(context, job)
+
+    def invoke(self, context, event):
+        try:
+            started = self._start(context)
+        except RuntimeError as exc:
+            log_mod.logger.error("apply_skin failed: %s", exc)
+            self.report({"ERROR"}, str(exc))
+            return {"CANCELLED"}
+        if started is None:
+            return {"CANCELLED"}
+        self._timer = context.window_manager.event_timer_add(0.25, window=context.window)
+        context.window_manager.modal_handler_add(self)
+        _redraw_panels(context)
+        return {"RUNNING_MODAL"}
+
+    def modal(self, context, event):
+        global _finish_job
+        job = _finish_job
+        if event.type != "TIMER":
+            return {"PASS_THROUGH"}
+        if job is None or job.cancelled:
+            context.window_manager.event_timer_remove(self._timer)
+            _finish_job = None
+            return {"CANCELLED"}
+        try:
+            done = self._step(context, job)
+        except Exception as exc:
+            context.window_manager.event_timer_remove(self._timer)
+            _finish_job = None
+            log_mod.logger.exception("applying a finish failed")
+            self.report({"ERROR"}, str(exc))
+            _redraw_panels(context)
+            return {"CANCELLED"}
+        _redraw_panels(context)
+        if not done:
+            return {"PASS_THROUGH"}
+        context.window_manager.event_timer_remove(self._timer)
+        return self._finish(context, job)
 
 
 class CS2RIG_OT_remove_skin(_AgentOperator):
@@ -771,6 +846,13 @@ def _forget_glove_job(*_args) -> None:
     """A file being opened ends a glove job: its agent belongs to the file being closed."""
     if _glove_job is not None:
         _glove_job.cancelled = True
+
+
+@bpy.app.handlers.persistent
+def _forget_finish_job(*_args) -> None:
+    """A file being opened ends a finish job: its weapon belongs to the file being closed."""
+    if _finish_job is not None:
+        _finish_job.cancelled = True
 
 
 class CS2RIG_OT_remove_gloves(_AgentOperator):
@@ -1050,7 +1132,10 @@ class CS2RIG_PT_main(bpy.types.Panel):
             row.prop(wm, "cs2rig_wear", slider=True)
             row.prop(wm, "cs2rig_seed")
             row = box.row(align=True)
-            row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
+            if _finish_job is not None and not _finish_job.cancelled:
+                row.label(text=f"{_finish_job.stage}...", icon="TIME")
+            else:
+                row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
             row.operator("cs2rig.remove_skin", text="", icon="X")
 
         box = layout.box()
@@ -1140,6 +1225,8 @@ def register():
     clip_browser.register()
     if _forget_glove_job not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_forget_glove_job)
+    if _forget_finish_job not in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.append(_forget_finish_job)
     if _on_file_loaded not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_file_loaded)
     _start_log()
@@ -1197,9 +1284,12 @@ def unregister():
     clip_browser.unregister()
     if _forget_glove_job in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.remove(_forget_glove_job)
+    if _forget_finish_job in bpy.app.handlers.load_pre:
+        bpy.app.handlers.load_pre.remove(_forget_finish_job)
     if _on_file_loaded in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_file_loaded)
     _forget_glove_job()
+    _forget_finish_job()
     wm = bpy.types.WindowManager
     for name in ("cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)

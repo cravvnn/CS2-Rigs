@@ -94,7 +94,9 @@ rate the game clips are authored at.
 With a weapon held, choose a **Finish**, set **Wear** and **Seed**, and press
 **Apply Finish**. The finish is built from the weapon's own textures, the
 finish's pattern and colours and the game's wear and grime textures, so it wears
-like it does in the game. The result is kept in the cache and packed into the .blend.
+like it does in the game. It is made in the background the first time, so Blender
+stays usable; a finish already in the cache is put on at once. The result is kept
+in the cache and packed into the .blend.
 
 - **Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
   the range the finish allows.
