@@ -237,6 +237,20 @@ def relink_linked_maps(map_root: Path) -> int:
     return relinked
 
 
+def reload_map(name: str) -> bool:
+    """Reload a linked map after its file was rebuilt. False when the scene holds a copy instead."""
+    for library in bpy.data.libraries:
+        path = Path(bpy.path.abspath(library.filepath))
+        if path.parent.parent.name != "maps" or path.stem != name:
+            continue
+        try:
+            library.reload()
+        except RuntimeError:
+            return False
+        return True
+    return False
+
+
 def remove_missing_map(name: str) -> None:
     """Drop a missing map's library, and the empty stand-ins Blender keeps for what it linked."""
     library = missing_maps().get(name)

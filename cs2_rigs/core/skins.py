@@ -124,6 +124,15 @@ def parse_localisation(text: str) -> dict[str, str]:
     return {key.lower(): value for key, value in tokens.items() if isinstance(value, str)}
 
 
+def read_english(converter: Converter, package: Path) -> dict[str, str]:
+    """The game's English text, or {} when it cannot be read. Names are a nicety, never a failure."""
+    try:
+        with tempfile.TemporaryDirectory() as work_dir:
+            return parse_localisation(converter.read_text(package, ENGLISH, Path(work_dir)))
+    except (AttributeError, OSError, RuntimeError, ValueError):
+        return {}
+
+
 @dataclass(frozen=True)
 class PaintKit:
     id: int

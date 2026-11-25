@@ -34,34 +34,38 @@ is converted from the game files on your disk, offline.
 
 1. Download `CS2_Rigs_<version>_Windows_x64.zip` from [Releases](https://github.com/cravvnn/CS2-Rigs/releases). Don't unzip it.
 2. Drag the zip into Blender, or use **Edit > Preferences > Get Extensions > Install from Disk**.
-3. In the 3D View press **N** and open the **CS2 Rigs** tab. Press **Download Converter** (about 65 MB, once). Blender's
+3. In the 3D View press **N** and open the **CS2 Rigs** tab. Press **Download Converter** (65 MB, once). Blender's
    online access must be allowed under **Preferences > System**.
-4. Press **Refresh**. The first time it reads the game's catalogue and finishes, which takes about half a minute.
+4. Press **Read Game Files**. The first time it reads the game's catalogue and finishes, which takes about half a minute.
    After that, opening a saved file fills the lists and matches them to the agent in it.
-5. Choose an agent and press **Import Agent**, then **Hold Weapon**, **Apply Finish**, **Load Clip** and **Add Controls**.
+5. Choose an agent and press **Import Agent**, then **Hold Weapon**, **Apply Finish**, **Load Clip** and **Add Pose Controls**.
+
+The tab is split into **Agent**, **Weapon**, **Gloves**, **Animation**, **Pose Controls**, **Map** and **Tools**.
+Each section's header shows what is in it, such as the held weapon and its finish, and the top of the tab says
+what to do next. A failed step stays at the top with **Open Log Folder** until the next step works.
 
 The game is found through Steam. If it is somewhere unusual, set **Game Folder** in the add-on preferences.
 
 | First time | About |
 | --- | --- |
 | Download Converter | 65 MB, once |
-| Refresh | about 30 s, then instant |
+| Read Game Files | about 30 s, then instant |
 | Import an agent, hold a weapon or load a clip | a few seconds each, then from the cache |
 | Apply a finish | about 10 s, then from the cache |
 | Add a map | 3 to 5 minutes and about 1 GB, then seconds |
 
 ## Features
 
-- **Agents.** All agents with their materials, posed by the game's skeleton.
+- **Agents.** All agents with their materials, posed by the game's skeleton. The lists use the game's English names.
 - **Weapons.** Every weapon and knife, held on the agent's weapon bone so it follows the clip.
-- **Finishes.** Weapon, knife and glove finishes built the way the game builds them, with **Wear** and **Seed**.
+- **Finishes.** Weapon, knife and glove finishes built the way the game builds them, with **Weapon Wear** and **Weapon Seed**.
 - **Animation clips.** Every game clip made for agents, gameplay and menu poses, filtered to the held weapon.
-- **Controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
+- **Pose controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
 - **Maps.** Game maps built once into their own file, then linked or copied into your scene.
 
 ### Agents and clips
 
-Press **Refresh**, choose an agent and press **Import Agent**. With the agent selected,
+Press **Read Game Files**, choose an agent and press **Import Agent**. With the agent selected,
 search for a clip and press **Load Clip**.
 
 **Hold Weapon** puts the chosen weapon on the agent's weapon bone, so it follows
@@ -69,15 +73,16 @@ the clip. A clip made for the held weapon also moves its parts: slides, bolts,
 magazines and knife blades. The clip list then shows only clips made for that kind of weapon: the
 weapon's own clips first (a karambit's own draw), then the default ones it does
 not replace, then the shared deaths, flinches and jumps. A rifle clip leaves a
-knife floating where the rifle would be. Untick **Only Clips for the Held Weapon**
-to see every clip, including the first-person, chicken and egg clips, which are
+knife floating where the rifle would be. Untick **Only clips for AK-47** (the
+checkbox names the held weapon) to see every clip, including the first-person, chicken and egg clips, which are
 made for other skeletons and do not play on an agent.
 
 Some clips only hold the difference from another pose and the game plays them on
 top of one. For those the game's own full version is loaded instead.
 
-**Build Clip Previews** loads every agent clip once in the background, checks it
-and saves a small stick-figure preview of it. It takes about ten minutes.
+**Build Clip Thumbnails** in **Tools** loads every agent clip once in the background, checks it
+and saves a small stick-figure preview of it. It takes about ten minutes, and
+**Cancel** stops it.
 
 **Browse Clips** opens every clip in the game by category, including the menu
 poses, with a search field. Point at a clip to see its skeleton play; click it to
@@ -91,16 +96,17 @@ rate the game clips are authored at.
 
 ### Finishes
 
-With a weapon held, choose a **Finish**, set **Wear** and **Seed**, and press
+With a weapon held, choose a **Finish** in the **Weapon** section, set **Weapon Wear** and **Weapon Seed**, and press
 **Apply Finish**. The finish is built from the weapon's own textures, the
 finish's pattern and colours and the game's wear and grime textures, so it wears
 like it does in the game. It is made in the background the first time, so Blender
 stays usable; a finish already in the cache is put on at once. The result is kept
-in the cache and packed into the .blend.
+in the cache and packed into the .blend. The line under the button says which
+finish is on the weapon, with its wear and seed.
 
-- **Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
+- **Weapon Wear** runs from 0 (factory new) to 1 (battle-scarred) and is kept inside
   the range the finish allows.
-- **Seed** moves the pattern, wear and grime around using the same random
+- **Weapon Seed** moves the pattern, wear and grime around using the same random
   sequence as the game, so pattern seeds (such as Case Hardened or Fade) match.
 - Older finishes are laid out for the weapon's previous model, so applying one
   switches the weapon to that body.
@@ -114,19 +120,20 @@ in the cache and packed into the .blend.
 
 ### Gloves
 
-With an agent selected, choose **Gloves** in the Agent box (for example Sport Gloves |
-Vice or Driver Gloves | King Snake), set **Wear** and **Seed** and press **Apply
+With an agent selected, open the **Gloves** section, choose a glove finish (for example Sport Gloves |
+Vice or Driver Gloves | King Snake), set **Glove Wear** and **Glove Seed** and press **Apply
 Gloves**. The agent's default gloves are hidden and the glove model goes on its
 skeleton, so the hands follow every clip. **Remove Gloves** brings the defaults back.
 The finish is built once per hand, so left and right differ the way they do in the game.
+The line under the button says what the hands are wearing, and **Cancel** stops a finish being made.
 
 The finish is built from the game's `csgo_customglove` shader inputs for both
 generations of glove finishes, including detail and damage normals, wear and
 left/right pattern flipping. All 94 glove finishes can be applied.
 
-### Controls
+### Pose controls
 
-**Add Controls** adds, in Pose Mode:
+**Add Pose Controls** adds, in Pose Mode:
 
 - hand and foot IK controls with elbow and knee poles. Each limb has a 0 to 1
   switch: at 0 the game clip drives it, at 1 the control does. The **IK** and
@@ -139,7 +146,9 @@ left/right pattern flipping. All 94 glove finishes can be applied.
   its clips do not animate them, so without the controls forearms pinch when the
   hand turns.
 
-Only the controls that currently drive a limb are shown. **Remove Controls** takes
+Only the controls that currently drive a limb are shown, and the **IK** or **FK**
+button for the current state is drawn pressed. Outside Pose Mode a **Switch to
+Pose Mode** button appears. **Remove Pose Controls** takes
 them off again and leaves the agent as imported.
 
 ![IK controls on an agent](docs/ik-controls.png)
@@ -148,10 +157,12 @@ them off again and leaves the agent as imported.
 
 Choose a map and press **Add Map**. The first time, the map is converted and built
 into its own .blend in the cache, which takes a few minutes and about 1 GB per
-map; Blender stays usable meanwhile, and the **X** next to the progress stops it.
-After that it is added in seconds. With **Link** ticked the scene links to that
+map; Blender stays usable meanwhile, and the **Cancel** next to the progress stops it.
+After that it is added in seconds. With **Link to Map File** ticked the scene links to that
 file and stays small; unticked, the map is copied into the scene. Built maps stay
-in the cache across game updates; a map built from older game files still loads.
+in the cache across game updates; a map built from older game files still loads,
+and its row offers **Rebuild** when newer game files would make a better one. A
+map whose file is gone shows as a missing row; **X** takes it out.
 
 Maps come with the game's sun but no baked lighting, so a scene without a world
 gets a plain sky for fill light. Names ending in `_vanity` are the small scenes
@@ -162,12 +173,12 @@ the game shows behind its menus.
 ### Cache
 
 Converted files live in `%LOCALAPPDATA%\cs2-rigs\cache`, in one folder per game
-version and converter build. A game update starts a new folder; press **Refresh**
+version and converter build. A game update starts a new folder; press **Read Game Files**
 after one. Built maps are kept in `%LOCALAPPDATA%\cs2-rigs\maps` instead, so a
 game update does not strand them or make them rebuild. The add-on preferences have
 buttons to clear old folders or everything. Clearing old folders moves their built
 maps to the maps folder first; clearing everything deletes the maps too. A map
-whose file is gone shows in the Map box: **Add Map** links it to a new build, and
+whose file is gone shows in the Map section: **Add Map** links it to a new build, and
 **X** takes it out. Converting everything takes about 6 GB.
 
 ### Updates
@@ -182,7 +193,8 @@ access off, no check is made and the tab shows **Check for Updates** instead.
 
 Each step is written to `cs2-rigs.log`, next to the cache by default. **Cache
 Folder** and **Log Folder** in the preferences move them anywhere else, and **Open
-Log Folder** shows the log.
+Log Folder** in **Tools** shows the log. The same button sits under the last error
+at the top of the tab.
 
 ## Compatibility
 
@@ -194,7 +206,7 @@ Log Folder** shows the log.
   `CS2RIG_S2V_CLI` environment variable.
 
 **Sharing .blend files.** Applied finishes are packed into the .blend, and a map
-that is copied in (Link unticked) is stored in it. Sending such a file to someone
+that is copied in (Link to Map File unticked) is stored in it. Sending such a file to someone
 passes on Valve's assets with it; share renders, or files with linked maps and no finish.
 
 ## Known issues
@@ -210,7 +222,7 @@ This is an alpha. Not done yet:
   knife spins open in its own draw and an AK-47's magazine drops in its own reload, but
   a clip made for another weapon leaves the parts still. The parts have no controls.
 - **Maps** have no baked lighting and cannot be cropped to an area yet.
-- **Controls:** no torso or hip controls; twist bone weights are estimates.
+- **Pose controls:** no torso or hip controls; twist bone weights are estimates.
 - **Third person only;** first-person arms are not set up.
 - **Long paths:** Blender cannot open files whose path is over 259 characters. With a
   long Windows user name or a deep **Cache Folder** a conversion fails before it starts,
@@ -242,8 +254,9 @@ numpy for the compositor tests):
 finishes and maps. `tools/reopen_check.py` saves and reopens a file with a finish on.
 `tools/glove_check.py` puts glove finishes on a CT and a T agent and renders each hand, and
 `tools/glove_sweep.py` reads every glove finish and reports which apply.
-`tools/panel_check.py` draws the panel without a window, to
-catch a wrong icon, property or operator name. `tools/sweep.py` imports every
+`tools/panel_check.py` draws every section of the panel without a window, in each
+state it can be in, to catch a wrong icon, property or operator name; with
+`-- <out_dir>` it also writes `panel_states.json` for the HTML mock. `tools/sweep.py` imports every
 agent and holds every weapon, and `tools/finish_sweep.py` reads every finish
 of every weapon and applies one to each; both write a report of what fails.
 

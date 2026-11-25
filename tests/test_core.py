@@ -212,6 +212,82 @@ def test_catalog_can_be_built_from_a_listing_read_once():
         assert len(data["clips"]) == 2
 
 
+ENGLISH = {
+    "csgo_customplayer_ctm_sas_variantf": "B Squadron Officer | SAS",
+    "csgo_customplayer_tm_phoenix_varianth": "Soldier | Phoenix",
+    "sfui_wpnhud_ak47": "AK-47",
+    "sfui_wpnhud_m4a1": "M4A4",
+    "sfui_wpnhud_knifekaram": "Karambit",
+    "sfui_wpnhud_knife_survival_bowie": "Bowie Knife",
+}
+
+
+def test_agent_names_come_from_the_localisation_tokens():
+    assert catalog.agent_name("ctm_sas/ctm_sas_variantf", ENGLISH) == "B Squadron Officer | SAS"
+    assert catalog.agent_name("ctm_sas/ctm_sas", ENGLISH) == ""
+    agents = catalog.agents_from_entries(converter.parse_listing(LISTING), ENGLISH)
+    assert [(agent.key, agent.name) for agent in agents] == [
+        ("ctm_sas/ctm_sas", ""),
+        ("tm_phoenix/tm_phoenix_varianth", "Soldier | Phoenix"),
+    ]
+
+
+def test_weapon_names_come_from_the_localisation_tokens():
+    assert catalog.weapon_name("ak47", ENGLISH) == "AK-47"
+    assert catalog.weapon_name("m4a4", ENGLISH) == "M4A4"
+    assert catalog.weapon_name("knife_karambit", ENGLISH) == "Karambit"
+    assert catalog.weapon_name("knife_bowie", ENGLISH) == "Bowie Knife"
+    assert catalog.weapon_name("awp", ENGLISH) == ""
+
+
+def test_short_names_drop_the_faction_but_keep_duplicates_apart():
+    names = [
+        "Cmdr. Davida 'Goggles' Fernandez | SEAL Frogman",
+        "Dragomir | Sabre",
+        "Dragomir | Sabre Footsoldier",
+        "Aspirant | Gendarmerie Nationale",
+        "ctm_sas",
+    ]
+    assert catalog.short_names(names) == [
+        "Cmdr. Davida 'Goggles' Fernandez",
+        "Dragomir | Sabre",
+        "Dragomir | Sabre Footsoldier",
+        "Aspirant",
+        "ctm_sas",
+    ]
+    assert catalog.short_names(["A very long agent name without a faction"]) == ["A very long agent name without…"]
+
+
+def test_catalog_stores_the_names_it_reads_from_the_game():
+    class NamesConverter:
+        def read_text(self, package, path, work_dir):
+            assert path == "resource/csgo_english.txt"
+            return (
+                '"lang"\n{\n"Tokens"\n{\n'
+                '"CSGO_CustomPlayer_tm_phoenix_varianth" "Soldier | Phoenix"\n'
+                '"SFUI_WPNHUD_AK47" "AK-47"\n'
+                "}\n}\n"
+            )
+
+    listing = converter.parse_listing(
+        "agents/models/tm_phoenix/tm_phoenix_varianth.vmdl_c CRC:00 size:1\n"
+        "weapons/models/ak47/weapon_rif_ak47.vmdl_c CRC:00 size:1\n"
+    )
+    data = catalog.build_catalog(NamesConverter(), Path("pak01_dir.vpk"), listing)
+    assert catalog.catalog_agents(data)[0].name == "Soldier | Phoenix"
+    assert catalog.catalog_weapons(data)[0].name == "AK-47"
+
+
+def test_missing_localisation_never_stops_the_catalogue():
+    class BrokenConverter:
+        def read_text(self, *args):
+            raise OSError("pak01_dir.vpk is gone")
+
+    listing = converter.parse_listing("agents/models/ctm_sas/ctm_sas.vmdl_c CRC:00 size:1\n")
+    data = catalog.build_catalog(BrokenConverter(), Path("pak01_dir.vpk"), listing)
+    assert catalog.catalog_agents(data)[0].name == ""
+
+
 def test_weapons_list_only_holdable_models():
     listing = converter.parse_listing(
         "weapons/models/ak47/weapon_rif_ak47.vmdl_c CRC:00 size:1\n"

@@ -15,6 +15,7 @@ from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatPrope
 
 from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, updater
 from .core import cache as cache_mod
+from .core import clipdata as clipdata_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
 from .core import gloves as gloves_mod
@@ -22,8 +23,10 @@ from .core import proc
 from .core import skins as skins_mod
 from .core.download import CLI_VERSION
 
-# Filled by Refresh. Blender's enum callbacks need the item lists kept alive here.
+# Filled by Read Game Files. Blender's enum callbacks need the item lists kept alive here.
 _agent_items: list[tuple[str, str, str]] = []
+_agents: dict[str, catalog_mod.Agent] = {}
+_agent_shorts: dict[str, str] = {}
 _weapon_items: list[tuple[str, str, str]] = []
 _map_items: list[tuple[str, str, str]] = []
 _weapons: dict[str, catalog_mod.Weapon] = {}
@@ -42,19 +45,36 @@ _exit_hooked = False
 
 def _cancel_jobs() -> None:
     """Stop every running job, so no converter or background Blender outlives Blender."""
-    for job in (_map_job, _preview_job, _glove_job):
+    for job in (_map_job, _preview_job, _glove_job, _finish_job):
         if job is not None:
             job.cancel()
-    if _finish_job is not None:
-        _finish_job.cancelled = True
     proc.kill_all()
 
 
-_PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
+def _remember_error(context, message: str) -> None:
+    """Keep the last failure in the panel, where it stays readable after the status bar clears."""
+    wm = getattr(context, "window_manager", None)
+    if wm is not None and hasattr(wm, "cs2rig_error"):
+        wm.cs2rig_error = message.splitlines()[0]
+
+
+def _clear_error(context) -> None:
+    wm = getattr(context, "window_manager", None)
+    if wm is not None and getattr(wm, "cs2rig_error", ""):
+        wm.cs2rig_error = ""
+
+
+def _report_error(operator, context, message: str) -> None:
+    """Report an error in Blender and keep it in the panel until the next successful step."""
+    _remember_error(context, message)
+    operator.report({"ERROR"}, message)
+
+
+_PRESS_REFRESH = [("NONE", "Read Game Files first", "Read the lists from the game first")]
 
 
 def _reports_errors(execute):
-    """Show a failed step as an error in Blender instead of a traceback, and write each run to the log."""
+    """Show a failed step as an error in Blender and in the panel, instead of a traceback, and write each run to the log."""
 
     @functools.wraps(execute)
     def wrapper(self, context):
@@ -63,12 +83,14 @@ def _reports_errors(execute):
             result = execute(self, context)
         except (RuntimeError, OSError) as exc:  # setup, converter, download, import and file problems
             log_mod.logger.error("%s failed: %s (%s)", _op_name(self), exc, _selection(context, _op_name(self)))
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
         except Exception:
             log_mod.logger.exception("%s stopped with an unexpected error (%s)", _op_name(self), _selection(context, _op_name(self)))
+            _remember_error(context, f"{_op_name(self)} stopped with an unexpected error.")
             raise
         log_mod.logger.info("%s %s in %.1f s", _op_name(self), ", ".join(sorted(result)).lower(), time.monotonic() - started)
+        _clear_error(context)
         return result
 
     return wrapper
@@ -131,13 +153,15 @@ def _skin_enum(self, context):
     if key not in _skin_items:
         offered = skins_mod.kits_for(list(_kits.values()), skins_mod.item_name(key))
         _skin_items[key] = [
-            (kit.name, kit.label, f"{kit.rarity or 'finish'} ({kit.name})") for kit in offered if kit.name in _paintable
+            (kit.name, kit.label, f"{kit.rarity.title()} finish" if kit.rarity else "Finish")
+            for kit in offered
+            if kit.name in _paintable
         ]
     return _skin_items[key] or [("NONE", "No finishes", "This weapon has no finish that can be shown")]
 
 
 def _glove_enum(self, context):
-    return _glove_items or [("NONE", "No gloves", "Press Refresh to read the glove finishes from the game")]
+    return _glove_items or [("NONE", "No gloves", "Read the game files to list the glove finishes")]
 
 
 def _fill_clips(context: bpy.types.Context) -> None:
@@ -160,16 +184,24 @@ def _fill_clips(context: bpy.types.Context) -> None:
 def _fill_lists(context: bpy.types.Context, current: session.Session) -> None:
     """Read the agent, weapon, finish, glove, clip and map lists. Instant once the game files have been read."""
     data = current.catalog()
+    agents = catalog_mod.catalog_agents(data)
+    _agents.clear()
+    _agents.update({agent.key: agent for agent in agents})
+    _agent_shorts.clear()
+    _agent_shorts.update(zip((agent.key for agent in agents), catalog_mod.short_names([a.name or a.label for a in agents])))
     _agent_items[:] = [
-        (agent.key, f"{agent.side}  {agent.label}", agent.model_path) for agent in catalog_mod.catalog_agents(data)
+        (agent.key, f"{agent.side}  {_agent_shorts[agent.key]}", agent.name or f"{agent.side} agent") for agent in agents
     ]
     _weapons.clear()
     _weapons.update({weapon.key: weapon for weapon in catalog_mod.catalog_weapons(data)})
-    _weapon_items[:] = [(weapon.key, weapon.label, weapon.model_path) for weapon in _weapons.values()]
+    _weapon_items[:] = [
+        (weapon.key, weapon.name or weapon.label, _KIND_LABELS.get(weapon.kind, "Weapon")) for weapon in _weapons.values()
+    ]
     _maps.clear()
     _maps.update({game_map.name: game_map for game_map in catalog_mod.maps_in(current.install.maps_dir)})
     _map_items[:] = [
-        (m.name, f"{m.name}  (backdrop)" if m.is_backdrop else m.name, m.package) for m in _maps.values()
+        (m.name, f"{m.name}  (backdrop)" if m.is_backdrop else m.name, "Backdrop scene" if m.is_backdrop else "Playable map")
+        for m in _maps.values()
     ]
     _clip_labels[:] = [catalog_mod.clip_label(clip) for clip in sorted(data.get("clips", []), key=catalog_mod.clip_order)]
     _kits.clear()
@@ -178,11 +210,32 @@ def _fill_lists(context: bpy.types.Context, current: session.Session) -> None:
     _paintable.update(kit.name for kit in _kits.values() if current.can_apply(kit))
     _skin_items.clear()
     _glove_items[:] = [
-        (kit.name, gloves_mod.label(kit), f"{kit.rarity or 'finish'} ({kit.name})")
+        (kit.name, gloves_mod.label(kit), f"{kit.rarity.title()} finish" if kit.rarity else "Glove finish")
         for kit in gloves_mod.glove_kits(_kits.values())
         if kit.name in _paintable
     ]
     _fill_clips(context)
+
+
+def _agent_short(key: str) -> str:
+    """The agent's name as it fits a dropdown."""
+    agent = _agents.get(key)
+    return _agent_shorts.get(key) or (agent.label if agent is not None else key.rsplit("/", 1)[-1])
+
+
+def _agent_title(armature: bpy.types.Object) -> str:
+    """'B Squadron Officer (CT)', for the main panel and the Agent header."""
+    key = armature.get(importer.AGENT_KEY_PROP, "")
+    agent = _agents.get(key)
+    if agent is None:
+        return armature.name.removesuffix(".skeleton")
+    return f"{_agent_short(key)} ({agent.side})" if agent.side != "Other" else _agent_short(key)
+
+
+def _weapon_title(weapon: catalog_mod.Weapon | None) -> str:
+    if weapon is None:
+        return "the held weapon"
+    return weapon.name or weapon.label
 
 
 def _choose(wm, name: str, value, items) -> None:
@@ -227,14 +280,24 @@ def _on_file_loaded(*_args) -> None:
                 return
             current = session.get()
             if not current.has_lists():
-                return  # Refresh reads them the first time; that takes a while
+                return  # Read Game Files reads them the first time; that takes a while
             _fill_lists(context, current)
         _sync_to_scene(context)
     except Exception:  # never stop a file from opening
         log_mod.logger.exception("filling the lists after opening a file failed")
 
 
-_NEEDS_REFRESH = "Press Refresh to read the game files first"
+_NEEDS_REFRESH = "Read the game files first"
+_KIND_LABELS = {
+    "rif": "Rifle",
+    "pist": "Pistol",
+    "smg": "SMG",
+    "snip": "Sniper rifle",
+    "shot": "Shotgun",
+    "mach": "Machine gun",
+    "knife": "Knife",
+    "other": "Weapon",
+}
 
 
 class CS2RIG_Preferences(bpy.types.AddonPreferences):
@@ -286,16 +349,16 @@ class CS2RIG_ClipName(bpy.types.PropertyGroup):
 
 class CS2RIG_OT_download_converter(bpy.types.Operator):
     bl_idname = "cs2rig.download_converter"
-    bl_label = "Download Converter"
+    bl_label = "Download Converter (65 MB)"
     bl_description = (
-        f"Download Source2Viewer-CLI {CLI_VERSION} (about 65 MB) from its GitHub releases. "
-        "Blender waits until it finishes"
+        f"Download Source2Viewer-CLI {CLI_VERSION} from its GitHub release. "
+        "Needs online access in Preferences > System. Blender waits until it finishes"
     )
 
     @_reports_errors
     def execute(self, context):
         if not bpy.app.online_access:
-            self.report({"ERROR"}, "Blender is set to work offline. Allow online access in Preferences > System.")
+            _report_error(self, context, "Blender is set to work offline. Allow online access in Preferences > System.")
             return {"CANCELLED"}
         session.download_converter()
         self.report({"INFO"}, "The converter is ready.")
@@ -309,7 +372,7 @@ class CS2RIG_OT_check_update(bpy.types.Operator):
 
     def execute(self, context):
         if not updater.start_check(_addon_version(), asked=True):
-            self.report({"ERROR"}, "Blender is set to work offline. Allow online access in Preferences > System.")
+            _report_error(self, context, "Blender is set to work offline. Allow online access in Preferences > System.")
             return {"CANCELLED"}
         if bpy.app.background:
             updater.wait()
@@ -345,8 +408,8 @@ class CS2RIG_OT_install_update(bpy.types.Operator):
 
 class CS2RIG_OT_show_preferences(bpy.types.Operator):
     bl_idname = "cs2rig.show_preferences"
-    bl_label = "Set Game Folder"
-    bl_description = "Open the add-on preferences to choose the 'Counter-Strike Global Offensive' folder"
+    bl_label = "Set Game Folder..."
+    bl_description = "Open the add-on preferences to choose the Counter-Strike Global Offensive folder"
 
     def execute(self, context):
         bpy.ops.preferences.addon_show(module=__package__)
@@ -362,7 +425,7 @@ class CS2RIG_OT_open_log_folder(bpy.types.Operator):
     def execute(self, context):
         log_file = log_mod.current_file()
         if log_file is None:
-            self.report({"ERROR"}, "The log folder cannot be written. Choose another Log Folder.")
+            _report_error(self, context, "The log folder cannot be written. Choose another Log Folder.")
             return {"CANCELLED"}
         bpy.ops.wm.path_open(filepath=str(log_file.parent))
         return {"FINISHED"}
@@ -399,16 +462,16 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
     @_reports_errors
     def execute(self, context):
         if _building() is not None:
-            self.report({"ERROR"}, "A map is being built. Wait for it to finish.")
+            _report_error(self, context, "A map is being built. Wait for it to finish.")
             return {"CANCELLED"}
         if _preview_job is not None and _preview_job.running:
-            self.report({"ERROR"}, "Clip previews are being built. Wait for them to finish.")
+            _report_error(self, context, "Clip previews are being built. Wait for them to finish.")
             return {"CANCELLED"}
         if _glove_job is not None and _glove_job.busy:
-            self.report({"ERROR"}, "Gloves are being made. Wait for them to finish.")
+            _report_error(self, context, "Gloves are being made. Wait for them to finish.")
             return {"CANCELLED"}
         if _finish_job is not None and _finish_job.busy:
-            self.report({"ERROR"}, "A finish is being made. Wait for it to finish.")
+            _report_error(self, context, "A finish is being made. Wait for it to finish.")
             return {"CANCELLED"}
         cache = session.get().cache
         if self.everything:
@@ -432,11 +495,19 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
 
 class CS2RIG_OT_refresh(bpy.types.Operator):
     bl_idname = "cs2rig.refresh"
-    bl_label = "Refresh"
+    bl_label = "Read Game Files"
     bl_description = (
-        "Read the lists of agents, weapons, finishes, gloves, clips and maps from the installed game. "
-        "About half a minute the first time and after a game update, then instant"
+        "Read the agent, weapon, finish, glove, clip and map lists from the installed game. "
+        "About 30 seconds the first time, then instant"
     )
+
+    @classmethod
+    def poll(cls, context):
+        problem = session.setup_problem()
+        if problem is not None:
+            cls.poll_message_set(problem[1])
+            return False
+        return True
 
     @_reports_errors
     def execute(self, context):
@@ -481,8 +552,11 @@ class _AgentOperator(bpy.types.Operator):
 
 class CS2RIG_OT_fix_eyes(_AgentOperator):
     bl_idname = "cs2rig.fix_eyes"
-    bl_label = "Fix Eyes"
-    bl_description = "Rebuild eye materials on the selected agent(s) so irises and pupils appear"
+    bl_label = "Rebuild Eye Materials"
+    bl_description = (
+        "Rebuild the eye materials on the selected agent. Only agents imported with 0.1.0 need this; "
+        "new imports already have them"
+    )
 
     @_reports_errors
     def execute(self, context):
@@ -510,7 +584,7 @@ class CS2RIG_OT_load_clip(_AgentOperator):
     def execute(self, context):
         label = context.window_manager.cs2rig_clip
         if not label:
-            self.report({"ERROR"}, "Choose a clip first.")
+            _report_error(self, context, "Choose a clip first.")
             return {"CANCELLED"}
         armature = importer.find_agent_armature(context)
         with importer.working_on(context, armature):
@@ -532,10 +606,10 @@ class CS2RIG_OT_load_clip(_AgentOperator):
 
 class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
     bl_idname = "cs2rig.build_clip_previews"
-    bl_label = "Build Clip Previews"
+    bl_label = "Build Clip Thumbnails"
     bl_description = (
-        "Load every clip made for agents once, in the background: check that it plays and save a small "
-        "stick-figure preview for each. Takes about ten minutes the first time"
+        "Check every agent clip once and save a stick-figure thumbnail for the clip browser. "
+        "About ten minutes, in the background"
     )
     bl_options = {"REGISTER"}
 
@@ -561,7 +635,7 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
             return {"CANCELLED"}
         if job.error:
             log_mod.logger.error("building clip previews failed: %s", job.error)
-            self.report({"ERROR"}, job.error)
+            _report_error(self, context, job.error)
             return {"CANCELLED"}
         log_mod.logger.info("built clip previews: %d clips checked", job.done)
         self.report({"INFO"}, f"Checked {job.done} clips and saved their previews.")
@@ -579,7 +653,7 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         try:
             self._start(context)
         except RuntimeError as exc:
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
         self._timer = context.window_manager.event_timer_add(1.0, window=context.window)
         context.window_manager.modal_handler_add(self)
@@ -653,6 +727,23 @@ class CS2RIG_OT_cancel_gloves(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CS2RIG_OT_cancel_finish(bpy.types.Operator):
+    bl_idname = "cs2rig.cancel_finish"
+    bl_label = "Cancel Finish"
+    bl_description = "Stop making the finish now and remove the half-made images"
+
+    @classmethod
+    def poll(cls, context):
+        return _finish_job is not None and not _finish_job.cancelled
+
+    @_reports_errors
+    def execute(self, context):
+        if _finish_job is not None:
+            _finish_job.cancel()
+        self.report({"INFO"}, "Stopping the finish.")
+        return {"FINISHED"}
+
+
 class CS2RIG_OT_attach_weapon(_AgentOperator):
     bl_idname = "cs2rig.attach_weapon"
     bl_label = "Hold Weapon"
@@ -669,7 +760,7 @@ class CS2RIG_OT_attach_weapon(_AgentOperator):
     def execute(self, context):
         weapon = _weapons.get(context.window_manager.cs2rig_weapon)
         if weapon is None:
-            self.report({"ERROR"}, "Choose a weapon first.")
+            _report_error(self, context, "Choose a weapon first.")
             return {"CANCELLED"}
         armature = importer.find_agent_armature(context)
         with importer.working_on(context, armature):
@@ -699,7 +790,10 @@ class CS2RIG_OT_remove_weapon(_AgentOperator):
 class CS2RIG_OT_apply_skin(_AgentOperator):
     bl_idname = "cs2rig.apply_skin"
     bl_label = "Apply Finish"
-    bl_description = "Put the chosen finish on the held weapon, with the wear and seed above. About ten seconds the first time"
+    bl_description = (
+        "Put the chosen finish on the held weapon, with the Weapon Wear and Weapon Seed above. "
+        "About 10 seconds the first time"
+    )
 
     _timer = None
 
@@ -710,14 +804,20 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
             return False
         armature = importer.find_agent_armature(context)
         # A job cancelled by opening a file may still be finishing on its thread.
-        return armature is not None and bool(importer.held_weapon_key(armature)) and (_finish_job is None or not _finish_job.busy)
+        chosen = context.window_manager.cs2rig_skin
+        return (
+            armature is not None
+            and bool(importer.held_weapon_key(armature))
+            and chosen not in ("", "NONE")
+            and (_finish_job is None or not _finish_job.busy)
+        )
 
     def _start(self, context) -> paint.FinishJob | None:
         global _finish_job
         wm = context.window_manager
         kit = _kits.get(wm.cs2rig_skin)
         if kit is None:
-            self.report({"ERROR"}, "Choose a finish first.")
+            _report_error(self, context, "Choose a finish first.")
             return None
         _finish_job = paint.FinishJob(session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
         return _finish_job
@@ -727,6 +827,7 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         _finish_job = None
         if job.cancelled:
             return {"CANCELLED"}
+        _clear_error(context)
         log_mod.logger.info(
             "finish %s wear %.3f seed %d%s",
             job.kit.name, job.wear, job.seed, f", without {', '.join(job.missing)}" if job.missing else "",
@@ -764,7 +865,7 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
             started = self._start(context)
         except RuntimeError as exc:
             log_mod.logger.error("apply_skin failed: %s", exc)
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
         if started is None:
             return {"CANCELLED"}
@@ -780,7 +881,9 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
             return {"PASS_THROUGH"}
         if job is None or job.cancelled:
             context.window_manager.event_timer_remove(self._timer)
-            _finish_job = None
+            # Keep the job while its thread lives, so Apply Finish stays disabled.
+            if job is None or not job.busy:
+                _finish_job = None
             return {"CANCELLED"}
         try:
             done = self._step(context, job)
@@ -788,7 +891,7 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
             context.window_manager.event_timer_remove(self._timer)
             _finish_job = None
             log_mod.logger.exception("applying a finish failed")
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             _redraw_panels(context)
             return {"CANCELLED"}
         _redraw_panels(context)
@@ -818,8 +921,8 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
     bl_idname = "cs2rig.apply_gloves"
     bl_label = "Apply Gloves"
     bl_description = (
-        "Put the chosen glove finish on the agent's hands, with the wear and seed above. "
-        "The finish is made in the background the first time, so Blender stays usable"
+        "Put the chosen glove finish on the agent's hands, with the Glove Wear and Glove Seed above. "
+        "Made in the background the first time"
     )
 
     _timer = None
@@ -829,15 +932,20 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
         if not _glove_items:
             cls.poll_message_set(_NEEDS_REFRESH)
             return False
+        chosen = context.window_manager.cs2rig_glove
         # A job cancelled by opening a file may still be finishing on its thread.
-        return super().poll(context) and (_glove_job is None or not _glove_job.busy)
+        return (
+            super().poll(context)
+            and chosen not in ("", "NONE")
+            and (_glove_job is None or not _glove_job.busy)
+        )
 
     def _start(self, context) -> gloves.GloveJob | None:
         global _glove_job
         wm = context.window_manager
         kit = _kits.get(wm.cs2rig_glove)
         if kit is None:
-            self.report({"ERROR"}, "Choose gloves first.")
+            _report_error(self, context, "Choose gloves first.")
             return None
         armature = importer.find_agent_armature(context)
         _glove_job = gloves.GloveJob(session.get(), armature, kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
@@ -848,6 +956,7 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
         _glove_job = None
         if job.cancelled:
             return {"CANCELLED"}
+        _clear_error(context)
         log_mod.logger.info("gloves %s wear %.2f seed %d", job.kit.name, job.wear, job.seed)
         self.report({"INFO"}, f"Applied {gloves_mod.label(job.kit)}.")
         return {"FINISHED"}
@@ -879,7 +988,7 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
             started = self._start(context)
         except RuntimeError as exc:
             log_mod.logger.error("apply_gloves failed: %s", exc)
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
         if started is None:
             return {"CANCELLED"}
@@ -905,7 +1014,7 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
             context.window_manager.event_timer_remove(self._timer)
             _glove_job = None
             log_mod.logger.exception("applying gloves failed")
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             _redraw_panels(context)
             return {"CANCELLED"}
         _redraw_panels(context)
@@ -932,7 +1041,7 @@ def _forget_glove_job(*_args) -> None:
 def _forget_finish_job(*_args) -> None:
     """A file being opened ends a finish job: its weapon belongs to the file being closed."""
     if _finish_job is not None:
-        _finish_job.cancelled = True
+        _finish_job.cancel()
 
 
 class CS2RIG_OT_remove_gloves(_AgentOperator):
@@ -953,10 +1062,10 @@ class CS2RIG_OT_remove_gloves(_AgentOperator):
 
 class CS2RIG_OT_build_rig(_AgentOperator):
     bl_idname = "cs2rig.build_rig"
-    bl_label = "Add Controls"
+    bl_label = "Add Pose Controls"
     bl_description = (
-        "Add hand, foot, elbow and knee controls with foot roll to the selected agent, "
-        "and make its twist bones follow. Game clips keep working"
+        "Add hand and foot IK controls, elbow and knee poles, and foot roll to the selected agent. "
+        "Game clips keep working"
     )
 
     @classmethod
@@ -975,8 +1084,8 @@ class CS2RIG_OT_build_rig(_AgentOperator):
 
 class CS2RIG_OT_remove_rig(_AgentOperator):
     bl_idname = "cs2rig.remove_rig"
-    bl_label = "Remove Controls"
-    bl_description = "Remove the controls from the selected agent. Limbs under IK go back to the game clip"
+    bl_label = "Remove Pose Controls"
+    bl_description = "Remove the pose controls from the selected agent. Limbs under IK go back to the game clip"
 
     @classmethod
     def poll(cls, context):
@@ -991,6 +1100,29 @@ class CS2RIG_OT_remove_rig(_AgentOperator):
         return {"FINISHED"}
 
 
+class CS2RIG_OT_pose_mode(bpy.types.Operator):
+    bl_idname = "cs2rig.pose_mode"
+    bl_label = "Switch to Pose Mode"
+    bl_description = "Show the agent's pose controls, where they can be moved"
+
+    @classmethod
+    def poll(cls, context):
+        armature = importer.find_agent_armature(context)
+        return armature is not None and rig.has_rig(armature) and context.mode != "POSE"
+
+    @_reports_errors
+    def execute(self, context):
+        armature = importer.find_agent_armature(context)
+        importer.require_visible(armature)
+        importer._make_active(context, armature)
+        bpy.ops.object.mode_set(mode="POSE")
+        return {"FINISHED"}
+
+
+def _limb_name(limb: str, side: str) -> str:
+    return f"{'left' if side == 'L' else 'right'} {limb}"
+
+
 class CS2RIG_OT_snap_limb(_AgentOperator):
     bl_idname = "cs2rig.snap_limb"
     bl_label = "Switch Limb"
@@ -1001,6 +1133,13 @@ class CS2RIG_OT_snap_limb(_AgentOperator):
     to_ik: BoolProperty()
 
     @classmethod
+    def description(cls, context, properties):
+        name = _limb_name(properties.limb, properties.side)
+        if properties.to_ik:
+            return f"Switch the {name} to its IK control without moving it"
+        return f"Return the {name} to the game clip without moving it"
+
+    @classmethod
     def poll(cls, context):
         armature = importer.find_agent_armature(context)
         return armature is not None and rig.has_rig(armature)
@@ -1009,7 +1148,7 @@ class CS2RIG_OT_snap_limb(_AgentOperator):
     def execute(self, context):
         armature = importer.find_agent_armature(context)
         if (self.limb, self.side) not in rig.rigged_limbs(armature):
-            self.report({"ERROR"}, "This limb has no IK controls.")
+            _report_error(self, context, "This limb has no IK controls.")
             return {"CANCELLED"}
         snap = rig.snap_ik_to_fk if self.to_ik else rig.snap_fk_to_ik
         snap(context, armature, self.limb, self.side)
@@ -1033,7 +1172,7 @@ class CS2RIG_OT_set_follow(_AgentOperator):
     def execute(self, context):
         armature = importer.find_agent_armature(context)
         if self.prop not in rig.follows(armature):
-            self.report({"ERROR"}, "This agent has no such control.")
+            _report_error(self, context, "This agent has no such control.")
             return {"CANCELLED"}
         rig.set_follow(context, armature, self.prop, self.on)
         return {"FINISHED"}
@@ -1048,6 +1187,8 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
+    name: StringProperty()  # the map a row's Rebuild button points at
+    rebuild: BoolProperty()
     _timer = None
 
     @classmethod
@@ -1055,14 +1196,20 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
         return _building() is None and bool(_maps)
 
     def _chosen(self, context) -> catalog_mod.GameMap:
-        game_map = _maps.get(context.window_manager.cs2rig_map)
+        game_map = _maps.get(self.name) or _maps.get(context.window_manager.cs2rig_map)
         if game_map is None:
             raise RuntimeError("Choose a map first.")
-        if game_map.name in maps.maps_in_scene(context.scene):
+        if game_map.name in maps.maps_in_scene(context.scene) and not self.rebuild:
             raise RuntimeError(f"{game_map.name} is already in this scene.")
         return game_map
 
     def _add(self, context, library, game_map):
+        if self.rebuild and game_map.name in maps.maps_in_scene(context.scene):
+            if not maps.reload_map(game_map.name):
+                self.report({"WARNING"}, f"Rebuilt {game_map.name}. The copy in this scene is unchanged.")
+                return {"FINISHED"}
+            self.report({"INFO"}, f"Rebuilt {game_map.name}.")
+            return {"FINISHED"}
         link = context.window_manager.cs2rig_map_link
         if maps.add_map(context, library, game_map.name, link) is None:
             self.report({"INFO"}, f"Linked {game_map.name} to its new file.")
@@ -1075,7 +1222,7 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
     def execute(self, context):
         # Used by scripts and background runs: wait for the build.
         game_map = self._chosen(context)
-        library = maps.build_library(session.get(), game_map, bpy.app.binary_path)
+        library = maps.build_library(session.get(), game_map, bpy.app.binary_path, force=self.rebuild)
         return self._add(context, library, game_map)
 
     def invoke(self, context, event):
@@ -1084,14 +1231,14 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             game_map = self._chosen(context)
             current = session.get()
             library = maps.prepare_library(current, game_map)
-            if library.is_file():
+            if library.is_file() and not self.rebuild:
                 return self._add(context, library, game_map)
         except RuntimeError as exc:
             log_mod.logger.error("%s failed: %s", _op_name(self), exc)
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
-        _map_job = maps.BuildJob(current, game_map)
-        log_mod.logger.info("building %s", game_map.name)
+        _map_job = maps.BuildJob(current, game_map, force=self.rebuild)
+        log_mod.logger.info("%s %s", "rebuilding" if self.rebuild else "building", game_map.name)
         self._timer = context.window_manager.event_timer_add(1.0, window=context.window)
         context.window_manager.modal_handler_add(self)
         self.report({"INFO"}, f"Building {game_map.name}. Blender stays usable; this takes a few minutes.")
@@ -1116,14 +1263,14 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             return {"CANCELLED"}
         if job.error:
             log_mod.logger.error("building %s failed: %s", job.game_map.name, job.error)
-            self.report({"ERROR"}, job.error)
+            _report_error(self, context, job.error)
             return {"CANCELLED"}
         log_mod.logger.info("built %s", job.game_map.name)
         try:
             return self._add(context, job.library, job.game_map)
         except RuntimeError as exc:
             log_mod.logger.error("%s failed: %s", _op_name(self), exc)
-            self.report({"ERROR"}, str(exc))
+            _report_error(self, context, str(exc))
             return {"CANCELLED"}
 
 
@@ -1162,6 +1309,132 @@ def _draw_update(layout) -> None:
         layout.operator("cs2rig.check_update", icon="URL")
 
 
+def _agent(context) -> bpy.types.Object | None:
+    return importer.find_agent_armature(context)
+
+
+def _next_hint(context, armature: bpy.types.Object | None) -> str:
+    """One line that says what to do next in the state the panel is in."""
+    if not _agent_items:
+        return "Next: read the game files, then import an agent."
+    if armature is None:
+        return "Next: choose an agent and press Import Agent."
+    if not importer.held_weapon_key(armature):
+        return "Next: choose a weapon and press Hold Weapon."
+    action = armature.animation_data.action if armature.animation_data else None
+    if action is None or not action.get(importer.CLIP_KEY_PROP):
+        return "Next: choose a clip and press Load Clip."
+    if not rig.has_rig(armature):
+        return "Next: add pose controls, or add a map."
+    if maps.maps_in_scene(context.scene):
+        return "Next: press Browse Clips for another clip."
+    return "Next: add a map, or press Browse Clips for another clip."
+
+
+def _wear_text(wear: float) -> str:
+    return f"{wear:g}"
+
+
+def _applied_line(armature: bpy.types.Object) -> str:
+    settings = paint.worn_skin_settings(armature)
+    if settings is None:
+        return ""
+    kit = _kits.get(settings[0])
+    label = kit.label if kit is not None else settings[0]
+    return f"Applied: {label} · wear {_wear_text(settings[1])} · seed {settings[2]}"
+
+
+def _wearing_line(armature: bpy.types.Object) -> str:
+    settings = gloves.worn_glove_settings(armature)
+    if settings is None:
+        return ""
+    kit = _kits.get(settings[0])
+    label = gloves_mod.label(kit) if kit is not None else settings[0]
+    return f"Wearing: {label} · wear {_wear_text(settings[1])} · seed {settings[2]}"
+
+
+def _weapon_header(armature: bpy.types.Object) -> str:
+    weapon = _held_weapon(armature)
+    if weapon is None:
+        return "no weapon"
+    settings = paint.worn_skin_settings(armature)
+    kit = _kits.get(settings[0]) if settings is not None else None
+    return f"{_weapon_title(weapon)} · {kit.label}" if kit is not None else _weapon_title(weapon)
+
+
+def _gloves_header(armature: bpy.types.Object) -> str:
+    settings = gloves.worn_glove_settings(armature)
+    if settings is None:
+        return "none"
+    kit = _kits.get(settings[0])
+    return gloves_mod.label(kit) if kit is not None else settings[0]
+
+
+def _clip_header(armature: bpy.types.Object) -> str:
+    action = armature.animation_data.action if armature.animation_data else None
+    if action is None:
+        return "no clip"
+    clip = action.get(importer.CLIP_KEY_PROP)
+    return catalog_mod.clip_label(clip) if clip else action.name
+
+
+def _map_header(context: bpy.types.Context) -> str:
+    names = list(maps.maps_in_scene(context.scene))
+    missing = len(maps.missing_maps())
+    if missing:
+        names.append(f"{missing} missing")
+    return ", ".join(names) if names else "none"
+
+
+def _newer_build(game_map: catalog_mod.GameMap) -> bool:
+    try:
+        return maps.newer_build_possible(session.get(), game_map)
+    except (RuntimeError, OSError):
+        return False
+
+
+def _thumbnail_count() -> tuple[int, int] | None:
+    """How many clip thumbnails are saved, and how many agent clips there are."""
+    if not _clip_labels:
+        return None
+    try:
+        current = session.get()
+    except RuntimeError:
+        return None
+    status = clipdata_mod.read_status(current.cache.clip_status_file())
+    if status:
+        total = sum(1 for entry in status["clips"].values() if entry.get("verdict") != "other-skeleton")
+    else:
+        total = sum(1 for label in _clip_labels if label.startswith(("world/", "ui_anims/")))
+    made = 0
+    folder = current.cache.clip_preview_dir()
+    if folder.is_dir():
+        for path in folder.glob("*.json"):
+            try:
+                if path.stat().st_size:
+                    made += 1
+            except OSError:
+                continue
+    return made, total
+
+
+class _CS2RIGPanel(bpy.types.Panel):
+    bl_space_type = "VIEW_3D"
+    bl_region_type = "UI"
+    bl_category = "CS2 Rigs"
+    bl_parent_id = "CS2RIG_PT_main"
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_agent_items)
+
+
+class _AgentPanel(_CS2RIGPanel):
+    @classmethod
+    def poll(cls, context):
+        return bool(_agent_items) and _agent(context) is not None
+
+
 class CS2RIG_PT_main(bpy.types.Panel):
     bl_idname = "CS2RIG_PT_main"
     bl_label = "CS2 Rigs"
@@ -1169,117 +1442,247 @@ class CS2RIG_PT_main(bpy.types.Panel):
     bl_region_type = "UI"
     bl_category = "CS2 Rigs"
 
+    def draw_header(self, context):
+        if _agent_items:
+            self.layout.operator("cs2rig.refresh", text="", icon="FILE_REFRESH")
+
     def draw(self, context):
         layout = self.layout
         wm = context.window_manager
         _draw_update(layout)
-        problem = session.setup_problem() if not _agent_items else None
+        problem = session.setup_problem()
         if problem is not None and problem[0] == "game":
             col = layout.column()
             col.alert = True
-            col.label(text="Counter-Strike 2 was not found.", icon="ERROR")
+            col.label(text=problem[1], icon="ERROR")
             layout.operator("cs2rig.show_preferences", icon="PREFERENCES")
         elif problem is not None:
-            layout.label(text="The converter is needed once (about 65 MB).", icon="INFO")
+            layout.label(text="The converter is needed once (65 MB).", icon="INFO")
             layout.operator("cs2rig.download_converter", icon="IMPORT")
-        layout.operator("cs2rig.refresh", icon="FILE_REFRESH")
-        armature = importer.find_agent_armature(context)
+        if not _agent_items and problem is None:
+            col = layout.column()
+            col.scale_y = 1.4
+            col.operator("cs2rig.refresh", icon="FILE_REFRESH")
+            layout.label(text="About 30 seconds the first time.", icon="TIME")
+        armature = _agent(context)
+        if armature is not None:
+            layout.label(text=f"Acting on {_agent_title(armature)}", icon="ARMATURE_DATA")
+        layout.label(text=_next_hint(context, armature), icon="INFO")
+        if wm.cs2rig_error:
+            col = layout.column()
+            col.alert = True
+            col.label(text=wm.cs2rig_error, icon="ERROR")
+            layout.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
 
-        box = layout.box()
-        box.label(text="Agent")
-        box.prop(wm, "cs2rig_agent", text="")
-        box.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
-        box.operator("cs2rig.fix_eyes", icon="HIDE_OFF")
+
+class CS2RIG_PT_agent(_CS2RIGPanel):
+    bl_idname = "CS2RIG_PT_agent"
+    bl_label = "Agent"
+    bl_order = 10
+
+    def draw_header(self, context):
+        armature = _agent(context)
+        self.layout.label(text=_agent_title(armature) if armature is not None else "none")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        layout.prop(context.window_manager, "cs2rig_agent")
+        layout.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
         if not _agent_items:
-            box.label(text="Press Refresh to read the game files.", icon="INFO")
-        elif armature is None:
-            box.label(text="Select an imported agent.", icon="INFO")
-        else:
-            box.label(text=f"Acting on {armature.name.removesuffix('.skeleton')}", icon="ARMATURE_DATA")
-            box.prop(wm, "cs2rig_glove", text="Gloves")
-            row = box.row(align=True)
-            row.prop(wm, "cs2rig_glove_wear", slider=True)
-            row.prop(wm, "cs2rig_glove_seed")
-            if _glove_job is not None and not _glove_job.cancelled:
-                row = box.row(align=True)
-                row.label(text=f"{_glove_job.stage}...", icon="TIME")
-                row.operator("cs2rig.cancel_gloves", text="", icon="X")
-            else:
-                row = box.row(align=True)
-                row.operator("cs2rig.apply_gloves", icon="BRUSH_DATA")
-                row.operator("cs2rig.remove_gloves", text="", icon="X")
+            layout.label(text="Read the game files first.", icon="INFO")
+        elif _agent(context) is None:
+            layout.label(text="Select an imported agent.", icon="INFO")
 
-        box = layout.box()
-        box.label(text="Weapon")
-        box.prop(wm, "cs2rig_weapon", text="")
-        row = box.row(align=True)
+
+class CS2RIG_PT_weapon(_AgentPanel):
+    bl_idname = "CS2RIG_PT_weapon"
+    bl_label = "Weapon"
+    bl_order = 20
+
+    def draw_header(self, context):
+        armature = _agent(context)
+        self.layout.label(text=_weapon_header(armature) if armature is not None else "none")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        wm = context.window_manager
+        layout.prop(wm, "cs2rig_weapon")
+        row = layout.row(align=True)
         row.operator("cs2rig.attach_weapon", icon="ADD")
         row.operator("cs2rig.remove_weapon", text="", icon="X")
-        if armature is not None and importer.held_weapon_key(armature):
-            box.prop(wm, "cs2rig_skin", text="Finish")
-            row = box.row(align=True)
-            row.prop(wm, "cs2rig_wear", slider=True)
-            row.prop(wm, "cs2rig_seed")
-            row = box.row(align=True)
-            if _finish_job is not None and not _finish_job.cancelled:
-                row.label(text=f"{_finish_job.stage}...", icon="TIME")
-            else:
-                row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
+        armature = _agent(context)
+        if armature is None or not importer.held_weapon_key(armature):
+            layout.label(text="No weapon held.", icon="INFO")
+            return
+        layout.prop(wm, "cs2rig_skin")
+        layout.prop(wm, "cs2rig_wear", slider=True)
+        layout.prop(wm, "cs2rig_seed")
+        row = layout.row(align=True)
+        if _finish_job is not None and not _finish_job.cancelled:
+            row.label(text=f"{_finish_job.stage}...", icon="TIME")
+            row.operator("cs2rig.cancel_finish", text="Cancel", icon="X")
+        else:
+            row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
             row.operator("cs2rig.remove_skin", text="", icon="X")
+        applied = _applied_line(armature)
+        if applied:
+            layout.label(text=applied, icon="CHECKMARK")
 
-        box = layout.box()
-        box.label(text="Animation")
-        box.prop_search(wm, "cs2rig_clip", wm, "cs2rig_clips", text="", icon="ACTION")
-        box.prop(wm, "cs2rig_match_clips")
-        row = box.row(align=True)
+
+class CS2RIG_PT_gloves(_AgentPanel):
+    bl_idname = "CS2RIG_PT_gloves"
+    bl_label = "Gloves"
+    bl_order = 30
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        armature = _agent(context)
+        self.layout.label(text=_gloves_header(armature) if armature is not None else "none")
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        wm = context.window_manager
+        layout.prop(wm, "cs2rig_glove")
+        layout.prop(wm, "cs2rig_glove_wear", slider=True)
+        layout.prop(wm, "cs2rig_glove_seed")
+        row = layout.row(align=True)
+        if _glove_job is not None and not _glove_job.cancelled:
+            row.label(text=f"{_glove_job.stage}...", icon="TIME")
+            row.operator("cs2rig.cancel_gloves", text="Cancel", icon="X")
+        else:
+            row.operator("cs2rig.apply_gloves", icon="MOD_CLOTH")
+            row.operator("cs2rig.remove_gloves", text="", icon="X")
+        armature = _agent(context)
+        wearing = _wearing_line(armature) if armature is not None else ""
+        if wearing:
+            layout.label(text=wearing, icon="CHECKMARK")
+
+
+class CS2RIG_PT_animation(_AgentPanel):
+    bl_idname = "CS2RIG_PT_animation"
+    bl_label = "Animation"
+    bl_order = 40
+
+    def draw_header(self, context):
+        armature = _agent(context)
+        self.layout.label(text=_clip_header(armature) if armature is not None else "none")
+
+    def draw(self, context):
+        layout = self.layout
+        wm = context.window_manager
+        armature = _agent(context)
+        weapon = _held_weapon(armature) if armature is not None else None
+        layout.prop(wm, "cs2rig_match_clips", text=f"Only clips for {_weapon_title(weapon)}")
+        layout.prop_search(wm, "cs2rig_clip", wm, "cs2rig_clips", text="Clip", icon="ACTION")
+        row = layout.row(align=True)
         row.operator("cs2rig.load_clip", icon="PLAY")
         row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
-        if _preview_job is not None and _preview_job.running:
-            row = box.row(align=True)
-            row.label(text=_preview_job.progress, icon="TIME")
-            row.operator("cs2rig.cancel_clip_previews", text="", icon="X")
-        else:
-            box.operator("cs2rig.build_clip_previews", icon="ARMATURE_DATA")
 
-        box = layout.box()
-        box.label(text="Controls")
-        if armature is None or not rig.has_rig(armature):
-            box.operator("cs2rig.build_rig", icon="CON_KINEMATIC")
-        else:
-            for limb, side in rig.rigged_limbs(armature):
-                row = box.row(align=True)
-                row.prop(armature, f'["{rig.switch_prop(limb, side)}"]', text=f"{limb.title()} {side} IK", slider=True)
-                for label, to_ik in (("IK", True), ("FK", False)):
-                    op = row.operator("cs2rig.snap_limb", text=label)
-                    op.limb, op.side, op.to_ik = limb, side, to_ik
-            for prop in rig.follows(armature):
-                on = armature[prop] >= 0.5
-                op = box.operator("cs2rig.set_follow", text=rig.FOLLOWS[prop][2], depress=on, icon="LINKED" if on else "UNLINKED")
-                op.prop, op.on = prop, not on
-            if context.mode != "POSE":
-                box.label(text="Pose Mode shows the controls.", icon="INFO")
-            box.operator("cs2rig.remove_rig", icon="X")
 
-        box = layout.box()
-        box.label(text="Map")
-        box.prop(wm, "cs2rig_map", text="")
-        box.prop(wm, "cs2rig_map_link")
+class CS2RIG_PT_pose(_AgentPanel):
+    bl_idname = "CS2RIG_PT_pose"
+    bl_label = "Pose Controls"
+    bl_order = 50
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        armature = _agent(context)
+        added = armature is not None and rig.has_rig(armature)
+        self.layout.label(text="on" if added else "off")
+
+    def draw(self, context):
+        layout = self.layout
+        armature = _agent(context)
+        if armature is None:
+            return
+        if not rig.has_rig(armature):
+            layout.operator("cs2rig.build_rig", icon="CON_KINEMATIC")
+            return
+        if context.mode != "POSE":
+            layout.operator("cs2rig.pose_mode", icon="ARMATURE_DATA")
+            layout.label(text="Pose Mode shows the controls.", icon="INFO")
+        for limb, side in rig.rigged_limbs(armature):
+            switch = rig.switch_prop(limb, side)
+            active = armature.get(switch, 0.0) >= 0.5
+            row = layout.row(align=True)
+            row.prop(armature, f'["{switch}"]', text=f"{'Left' if side == 'L' else 'Right'} {limb.title()}", slider=True)
+            op = row.operator("cs2rig.snap_limb", text="IK", depress=active)
+            op.limb, op.side, op.to_ik = limb, side, True
+            op = row.operator("cs2rig.snap_limb", text="FK", depress=not active)
+            op.limb, op.side, op.to_ik = limb, side, False
+        for prop in rig.follows(armature):
+            on = armature[prop] >= 0.5
+            op = layout.operator(
+                "cs2rig.set_follow",
+                text=rig.FOLLOWS[prop][2],
+                depress=on,
+                icon="CHECKBOX_HLT" if on else "CHECKBOX_DEHLT",
+            )
+            op.prop, op.on = prop, not on
+        layout.operator("cs2rig.remove_rig", icon="X")
+
+
+class CS2RIG_PT_map(_CS2RIGPanel):
+    bl_idname = "CS2RIG_PT_map"
+    bl_label = "Map"
+    bl_order = 60
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw_header(self, context):
+        self.layout.label(text=_map_header(context))
+
+    def draw(self, context):
+        layout = self.layout
+        layout.use_property_split = True
+        wm = context.window_manager
+        layout.prop(wm, "cs2rig_map")
+        layout.prop(wm, "cs2rig_map_link")
         job = _building()
         if job is not None:
-            row = box.row(align=True)
+            row = layout.row(align=True)
             row.label(text=f"Building {job.game_map.name}  {job.elapsed}", icon="TIME")
-            row.operator("cs2rig.cancel_map_build", text="", icon="X")
+            row.operator("cs2rig.cancel_map_build", text="Cancel", icon="X")
         else:
-            box.operator("cs2rig.add_map", icon="WORLD")
-        for name in maps.maps_in_scene(context.scene):
-            row = box.row(align=True)
-            row.label(text=name, icon="OUTLINER_COLLECTION")
+            layout.operator("cs2rig.add_map", icon="WORLD")
+        for name, collection in maps.maps_in_scene(context.scene).items():
+            row = layout.row(align=True)
+            kind = "linked" if collection.library is not None else "copied"
+            row.label(text=f"{name} · {kind}", icon="OUTLINER_COLLECTION")
             row.operator("cs2rig.remove_map", text="", icon="X").name = name
+            game_map = _maps.get(name)
+            if game_map is not None and _newer_build(game_map):
+                op = layout.operator("cs2rig.add_map", text=f"Rebuild {name}", icon="FILE_REFRESH")
+                op.name, op.rebuild = name, True
         for name in maps.missing_maps():
-            row = box.row(align=True)
+            row = layout.row(align=True)
             row.alert = True
-            row.label(text=f"{name}: file missing. Add Map relinks it", icon="ERROR")
+            row.label(text=f"{name}: file missing", icon="ERROR")
             row.operator("cs2rig.remove_map", text="", icon="X").name = name
+
+
+class CS2RIG_PT_tools(_CS2RIGPanel):
+    bl_idname = "CS2RIG_PT_tools"
+    bl_label = "Tools"
+    bl_order = 70
+    bl_options = {"DEFAULT_CLOSED"}
+
+    def draw(self, context):
+        layout = self.layout
+        count = _thumbnail_count()
+        if count is not None:
+            made, total = count
+            layout.label(text=f"Clip thumbnails: {made:,} of {total:,}", icon="IMAGE_DATA")
+        if _preview_job is not None and _preview_job.running:
+            row = layout.row(align=True)
+            row.label(text=_preview_job.progress, icon="TIME")
+            row.operator("cs2rig.cancel_clip_previews", text="Cancel", icon="X")
+        else:
+            layout.operator("cs2rig.build_clip_previews", icon="IMAGE_DATA")
+        layout.operator("cs2rig.fix_eyes", icon="MATERIAL")
+        layout.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
 
 
 _classes = (
@@ -1299,6 +1702,7 @@ _classes = (
     CS2RIG_OT_cancel_clip_previews,
     CS2RIG_OT_cancel_map_build,
     CS2RIG_OT_cancel_gloves,
+    CS2RIG_OT_cancel_finish,
     CS2RIG_OT_attach_weapon,
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
@@ -1307,11 +1711,19 @@ _classes = (
     CS2RIG_OT_remove_gloves,
     CS2RIG_OT_build_rig,
     CS2RIG_OT_remove_rig,
+    CS2RIG_OT_pose_mode,
     CS2RIG_OT_snap_limb,
     CS2RIG_OT_set_follow,
     CS2RIG_OT_add_map,
     CS2RIG_OT_remove_map,
     CS2RIG_PT_main,
+    CS2RIG_PT_agent,
+    CS2RIG_PT_weapon,
+    CS2RIG_PT_gloves,
+    CS2RIG_PT_animation,
+    CS2RIG_PT_pose,
+    CS2RIG_PT_map,
+    CS2RIG_PT_tools,
 )
 
 
@@ -1332,52 +1744,53 @@ def register():
     _start_log()
     updater.start_check(_addon_version())
     wm = bpy.types.WindowManager
-    wm.cs2rig_agent = EnumProperty(name="Agent", description="The agent to import", items=lambda self, context: _agent_items or _PRESS_REFRESH)
+    wm.cs2rig_agent = EnumProperty(name="Agent", description="The agent to import. CT agents are listed first", items=lambda self, context: _agent_items or _PRESS_REFRESH)
     wm.cs2rig_weapon = EnumProperty(name="Weapon", description="The weapon or knife to put in the selected agent's hands", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
-    wm.cs2rig_skin = EnumProperty(name="Finish", description="The finish for the held weapon. Only finishes made for it are listed", items=_skin_enum)
+    wm.cs2rig_skin = EnumProperty(name="Finish", description="The finish for the held weapon. Only finishes made for this weapon are listed", items=_skin_enum)
     wm.cs2rig_wear = FloatProperty(
-        name="Wear",
-        description="How worn the finish is, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
+        name="Weapon Wear",
+        description="How worn the weapon finish is, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
         min=0.0,
         max=1.0,
         default=0.0,
     )
     wm.cs2rig_seed = IntProperty(
-        name="Seed",
-        description="Pattern seed (0 to 1000). Places the pattern, wear and grime where the game puts them",
+        name="Weapon Seed",
+        description="Pattern seed, 0 to 1000. Places the pattern, wear and grime where the game puts them",
         min=0,
         max=1000,
         default=0,
     )
     wm.cs2rig_glove = EnumProperty(name="Gloves", description="The glove finish to put on the selected agent's hands", items=_glove_enum)
     wm.cs2rig_glove_wear = FloatProperty(
-        name="Wear",
+        name="Glove Wear",
         description="How worn the gloves are, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
         min=0.0,
         max=1.0,
         default=0.0,
     )
     wm.cs2rig_glove_seed = IntProperty(
-        name="Seed",
-        description="Varies where the pattern and wear fall. The placement for a seed is not the one the game gives it",
+        name="Glove Seed",
+        description="Varies where the pattern and wear fall, 0 to 1000. The placement is not the one the game gives that seed",
         min=0,
         max=1000,
         default=0,
     )
-    wm.cs2rig_map = EnumProperty(name="Map", description="The map to bring into the scene", items=lambda self, context: _map_items or _PRESS_REFRESH)
+    wm.cs2rig_map = EnumProperty(name="Map", description="The map to add to the scene. Backdrop scenes are the small scenes behind the game's menus", items=lambda self, context: _map_items or _PRESS_REFRESH)
     wm.cs2rig_map_link = BoolProperty(
-        name="Link",
-        description="Keep the map in its own file and link to it, which keeps this file small. Turn off to copy the map into this file",
+        name="Link to Map File",
+        description="Keep the map in its own file and link to it, so this file stays small. Turn off to copy the map into this file",
         default=True,
     )
     wm.cs2rig_clips = CollectionProperty(type=CS2RIG_ClipName)
-    wm.cs2rig_clip = StringProperty(name="Clip", description="Game animation clip to load")
+    wm.cs2rig_clip = StringProperty(name="Clip", description="The game animation to load on the selected agent")
     wm.cs2rig_match_clips = BoolProperty(
-        name="Only Clips for the Held Weapon",
-        description="List only clips made for the kind of weapon the agent holds, so the weapon sits in its hands",
+        name="Only clips for the held weapon",
+        description="List only clips made for the kind of weapon the agent holds, so it sits in the hands. Untick to see every clip",
         default=True,
         update=lambda self, context: _fill_clips(context),
     )
+    wm.cs2rig_error = StringProperty(name="Last Error")
 
 
 def unregister():
@@ -1395,7 +1808,7 @@ def unregister():
         atexit.unregister(_cancel_jobs)
         _exit_hooked = False
     wm = bpy.types.WindowManager
-    for name in ("cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
+    for name in ("cs2rig_error", "cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

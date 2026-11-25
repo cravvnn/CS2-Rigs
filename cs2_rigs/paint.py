@@ -7,6 +7,7 @@ game adds at render time (pearlescence, glitter, iridescence) are not shown.
 
 from __future__ import annotations
 
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -18,6 +19,7 @@ from . import importer
 from .core import composite
 from .core import finish as finish_mod
 from .core import png
+from .core import proc
 from .core import skins as skins_mod
 from .session import Session, SetupError
 
@@ -339,6 +341,7 @@ class FinishJob:
         self.cancelled = False
         self._phase = "prepare"
         self._error: BaseException | None = None
+        self._tracker = proc.Tracker()
         self._thread: threading.Thread | None = None
         self._values: dict = {}
         self._paths: dict[str, Path] = {}
@@ -353,11 +356,19 @@ class FinishJob:
     def _run(self, work) -> None:
         def guarded():
             try:
-                work()
+                with proc.tracked(self._tracker):
+                    work()
             except BaseException as exc:  # raised again on the main thread
                 self._error = exc
         self._thread = threading.Thread(target=guarded, name="cs2rig-finish", daemon=True)
         self._thread.start()
+
+    def cancel(self) -> None:
+        """Stop now: kill the converter and drop a finish that was being made."""
+        self.cancelled = True
+        self._tracker.cancel()
+        if self._files is None:
+            shutil.rmtree(self.out_dir, ignore_errors=True)
 
     @property
     def busy(self) -> bool:

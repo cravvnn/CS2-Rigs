@@ -17,7 +17,31 @@ WORLD_CLIP_PREFIX = "animation/anims/world/"
 BASE_CLIP = "animation/anims/world/knife/_default_knife/idle_knife"
 AGENT_CLIP_PREFIXES = (WORLD_CLIP_PREFIX, CLIP_PREFIX + "ui_anims/")
 WEAPON_PREFIX = "weapons/models/"
-CATALOG_VERSION = 2
+CATALOG_VERSION = 3
+# The game's English names: "CSGO_CustomPlayer_ctm_sas_variantf" and "SFUI_WPNHUD_AK47".
+AGENT_NAME_PREFIX = "csgo_customplayer_"
+WEAPON_NAME_PREFIX = "sfui_wpnhud_"
+# Weapon name tokens spelled differently from the catalogue key.
+WEAPON_NAME_TOKENS = {
+    "m4a4": "m4a1",
+    "elite": "elites",
+    "cz75a": "cz75",
+    "incendiarygrenade": "incgrenade",
+    "knife_default_ct": "knife",
+    "knife_default_t": "knife",
+    "knife_bayonet": "knifebayonet",
+    "knife_m9": "knifem9",
+    "knife_flip": "knifeflip",
+    "knife_gut": "knifegut",
+    "knife_css": "knifecss",
+    "knife_tactical": "knifetactical",
+    "knife_falchion": "knife_falchion_advanced",
+    "knife_karambit": "knifekaram",
+    "knife_bowie": "knife_survival_bowie",
+    "knife_navaja": "knife_gypsy_jackknife",
+    "knife_talon": "knife_widowmaker",
+}
+SHORT_NAME_LIMIT = 32  # characters that fit a dropdown at a normal sidebar width
 
 
 @dataclass(frozen=True)
@@ -25,6 +49,7 @@ class Agent:
     key: str  # "ctm_sas/ctm_sas_variantf"
     model_path: str  # "agents/models/ctm_sas/ctm_sas_variantf.vmdl_c"
     faction: str  # "ctm_sas"
+    name: str = ""  # the game's English name, "" when it has none
 
     @property
     def side(self) -> str:
@@ -39,7 +64,13 @@ class Agent:
         return self.key.split("/")[-1]
 
 
-def agents_from_entries(entries: list[PackageEntry]) -> list[Agent]:
+def agent_name(key: str, english: dict[str, str]) -> str:
+    """The game's English name for an agent key, or ''."""
+    model = key.rsplit("/", 1)[-1].lower()
+    return english.get(AGENT_NAME_PREFIX + model, "")
+
+
+def agents_from_entries(entries: list[PackageEntry], english: dict[str, str] | None = None) -> list[Agent]:
     agents = []
     for entry in entries:
         path = entry.path
@@ -50,7 +81,8 @@ def agents_from_entries(entries: list[PackageEntry]) -> list[Agent]:
         if len(parts) != 2 or parts[0] == "shared":
             continue
         name = parts[1][: -len(".vmdl_c")]
-        agents.append(Agent(key=f"{parts[0]}/{name}", model_path=path, faction=parts[0]))
+        key = f"{parts[0]}/{name}"
+        agents.append(Agent(key=key, model_path=path, faction=parts[0], name=agent_name(key, english or {})))
     return sorted(agents, key=lambda a: a.key)
 
 
@@ -59,17 +91,53 @@ class Weapon:
     key: str  # "ak47", "knife_karambit"
     model_path: str  # "weapons/models/ak47/weapon_rif_ak47.vmdl_c"
     kind: str  # "rif", "pist", "smg", "snip", "shot", "mach", "knife", or "other"
+    name: str = ""  # the game's English name, "" when it has none
 
     @property
     def label(self) -> str:
         return self.key.replace("_", " ")
 
 
+def weapon_name(key: str, english: dict[str, str]) -> str:
+    """The game's English name for a catalogue weapon key, or ''."""
+    from .skins import item_name  # skins imports this module, so only when it is needed
+
+    candidates = [WEAPON_NAME_TOKENS.get(key), key, item_name(key).removeprefix("weapon_")]
+    for candidate in candidates:
+        if not candidate:
+            continue
+        found = english.get(WEAPON_NAME_PREFIX + candidate.lower(), "")
+        if found:
+            return found
+    return ""
+
+
+def short_names(names: list[str], limit: int = SHORT_NAME_LIMIT) -> list[str]:
+    """Dropdown labels for game names: the part before ' | ', when that fits and is unique.
+
+    The full name stays for the tooltip. Two agents whose short forms would read
+    the same keep their full names, so the list still tells them apart.
+    """
+    shortened = [_before_faction(name, limit) for name in names]
+    counts: dict[str, int] = {}
+    for name in shortened:
+        counts[name] = counts.get(name, 0) + 1
+    return [name if counts[short] > 1 else short for name, short in zip(names, shortened)]
+
+
+def _before_faction(name: str, limit: int) -> str:
+    short = name.split(" | ", 1)[0].strip() if " | " in name else name
+    if len(short) <= limit:
+        return short
+    cut = short[: limit - 1].rsplit(" ", 1)[0] or short[: limit - 1]
+    return cut + "…"
+
+
 _WEAPON_KINDS = ("rif", "pist", "smg", "snip", "shot", "mach", "knife")
 _WEAPON_SKIP = ("_mag", "_broken_glass")
 
 
-def weapons_from_entries(entries: list[PackageEntry]) -> list[Weapon]:
+def weapons_from_entries(entries: list[PackageEntry], english: dict[str, str] | None = None) -> list[Weapon]:
     weapons = []
     for entry in entries:
         path = entry.path
@@ -85,7 +153,7 @@ def weapons_from_entries(entries: list[PackageEntry]) -> list[Weapon]:
         if kind not in _WEAPON_KINDS or not name:
             kind, name = "other", rest
         key = f"knife_{name}" if kind == "knife" else name
-        weapons.append(Weapon(key=key, model_path=path, kind=kind))
+        weapons.append(Weapon(key=key, model_path=path, kind=kind, name=weapon_name(key, english or {})))
     return sorted(weapons, key=lambda w: (w.kind, w.key))
 
 
@@ -112,10 +180,13 @@ def package_entries(converter: Converter, package: Path, entries=None) -> list[P
 
 
 def build_catalog(converter: Converter, package: Path, entries=None) -> dict:
+    from . import skins as skins_mod  # skins imports this module
+
     entries = package_entries(converter, package, entries)
-    agents = agents_from_entries(entries)
+    english = skins_mod.read_english(converter, package)
+    agents = agents_from_entries(entries, english)
     clips = clips_from_entries(entries)
-    weapons = weapons_from_entries(entries)
+    weapons = weapons_from_entries(entries, english)
     return {
         "version": CATALOG_VERSION,
         "agents": [asdict(a) for a in agents],
