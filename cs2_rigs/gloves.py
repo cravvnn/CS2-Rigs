@@ -45,6 +45,14 @@ def worn_gloves(armature: bpy.types.Object) -> str:
     return next((obj[GLOVE_PROP] for obj in _glove_meshes(armature)), "")
 
 
+def worn_glove_settings(armature: bpy.types.Object) -> tuple[str, float, int] | None:
+    """The glove finish on the agent with its wear and seed, or None."""
+    mesh = next(iter(_glove_meshes(armature)), None)
+    if mesh is None:
+        return None
+    return mesh[GLOVE_PROP], float(mesh.get(WEAR_PROP, 0.0)), int(mesh.get(SEED_PROP, 0))
+
+
 def _show(obj: bpy.types.Object, shown: bool) -> None:
     obj.hide_set(not shown)
     obj.hide_render = not shown
@@ -95,7 +103,7 @@ def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object)
     # The glove skeleton is the agent's own bones under the same names, so the weights carry over.
     for old in list(mesh.users_collection):
         old.objects.unlink(mesh)
-    armature.users_collection[0].objects.link(mesh)
+    (armature.users_collection or [context.scene.collection])[0].objects.link(mesh)
     mesh.parent = armature
     mesh.matrix_parent_inverse.identity()
     for modifier in mesh.modifiers:
@@ -116,22 +124,34 @@ HANDS = (True, False)  # left, right
 
 
 def _compose_and_save(session: Session, kit: skins_mod.PaintKit, wear: float, seed: int, work: dict[bool, tuple[dict, dict]]) -> None:
-    """Compose each hand's finish side by side and save its images. Needs no Blender."""
-    if not work:
-        return
-    with ThreadPoolExecutor(max_workers=len(work), thread_name_prefix="cs2rig-glove") as pool:
-        running = {left: pool.submit(gloves_mod.compose, values, textures, TEXTURE_SIZE, wear) for left, (values, textures) in work.items()}
-        for left, job in running.items():
-            result = job.result()
-            files, sheen = _hand_files(session, kit, left, wear, seed)
-            files["colour"].parent.mkdir(parents=True, exist_ok=True)
-            png.write(files["colour"], result["colour"])
-            # Occlusion, roughness and metalness packed the way the glTF importer wires them.
-            png.write(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1))
-            png.write(files["normal"], result["normal"])
-            if result["cloth"].max() > 0.0:
-                # Sheen colour (linear) with the cloth mask in alpha.
-                png.write(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1))
+    """Compose each hand's finish and save its images. Needs no Blender.
+
+    The hands are composed one after the other: each one needs several GB of
+    memory at full size, and composing both at once roughly doubled the peak.
+    A hand's images are saved while the next hand is composed.
+    """
+    with ThreadPoolExecutor(max_workers=1, thread_name_prefix="cs2rig-glove-save") as saver:
+        saving = []
+        for left in list(work):
+            values, textures = work.pop(left)
+            result = gloves_mod.compose(values, textures, TEXTURE_SIZE, wear)
+            saving.append(saver.submit(_save_hand, _hand_files(session, kit, left, wear, seed), result))
+            del result
+        for job in saving:
+            job.result()  # raises a failed save here
+
+
+def _save_hand(paths: tuple[dict, Path], result: dict) -> None:
+    files, sheen = paths
+    files["colour"].parent.mkdir(parents=True, exist_ok=True)
+    png.write(files["colour"], result["colour"])
+    # Occlusion, roughness and metalness packed the way the glTF importer wires them.
+    png.write(files["surface"], np.stack((result["occlusion"], result["roughness"], result["metalness"]), axis=-1))
+    if result["cloth"].max() > 0.0:
+        # Sheen colour (linear) with the cloth mask in alpha.
+        png.write(sheen, np.concatenate((result["sheen"], result["cloth"][..., None]), axis=-1))
+    # Written last: a hand counts as made once all three of its files are there.
+    png.write(files["normal"], result["normal"])
 
 
 class GloveJob:

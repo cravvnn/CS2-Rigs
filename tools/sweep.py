@@ -42,7 +42,7 @@ context = bpy.context
 wm = context.window_manager
 scene = context.scene
 
-if not session.converter_ready():
+if session.setup_problem() is not None:
     print("SWEEP downloading converter")
     assert bpy.ops.cs2rig.download_converter() == {"FINISHED"}
 current = session.get()

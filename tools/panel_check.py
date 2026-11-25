@@ -40,6 +40,9 @@ class Layout:
     def box(self, **_):
         return self
 
+    def column(self, **_):
+        return self
+
     def row(self, **_):
         return self
 

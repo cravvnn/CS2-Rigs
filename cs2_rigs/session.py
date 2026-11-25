@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import os
+import re
 from dataclasses import dataclass, field
 from pathlib import Path
 
@@ -60,6 +61,15 @@ class Session:
         if self._finishes is None:
             self._finishes = finish_mod.load_or_build_library(self.converter, self.install.main_package, self.cache.finishes_file)
         return self._finishes
+
+    def has_lists(self) -> bool:
+        """True when the game files were read before, so the lists load without the converter."""
+        stored = (
+            (self.cache.catalog_file, catalog_mod.CATALOG_VERSION),
+            (self.cache.skins_file, skins_mod.CATALOGUE_VERSION),
+            (self.cache.finishes_file, finish_mod.LIBRARY_VERSION),
+        )
+        return all(_stored_version(path) == version for path, version in stored)
 
     def can_apply(self, kit: skins_mod.PaintKit) -> bool:
         if gloves_mod.is_glove_kit(kit):
@@ -155,6 +165,16 @@ class Session:
         return path, compose
 
 
+def _stored_version(path: Path) -> int | None:
+    """The version a cached list was written with, read from the start of the file."""
+    try:
+        with open(path, encoding="utf-8") as handle:
+            match = re.match(r'\{"version":\s*(\d+)', handle.read(64))
+    except OSError:
+        return None
+    return int(match.group(1)) if match else None
+
+
 _session: Session | None = None
 
 
@@ -178,8 +198,13 @@ def get() -> Session:
     global _session
     if _session is not None:
         return _session
-    install = find_install(_setting("game_dir", ENV_GAME) or None)
+    game_dir = _setting("game_dir", ENV_GAME)
+    install = find_install(game_dir or None)
     if install is None:
+        if game_dir:
+            raise SetupError(
+                f"Counter-Strike 2 is not in {game_dir}. Set Game Folder to the 'Counter-Strike Global Offensive' folder."
+            )
         raise SetupError("Counter-Strike 2 was not found. Set the game folder in the add-on preferences.")
     cache_root = Path(_setting("cache_dir", ENV_CACHE) or default_cache_root())
     tools_dir = Cache(cache_root, install.version()).tools_dir
@@ -193,22 +218,36 @@ def get() -> Session:
     _session = Session(install, converter, Cache(cache_root, install.version(), converter.tag()))
     return _session
 
-def converter_ready() -> bool:
-    """True when a converter is available, without raising. Cheap enough for panel drawing."""
+
+def setup_problem() -> tuple[str, str] | None:
+    """What stops the game files being read, as ("game" or "converter", message), or None.
+
+    Never raises, and cheap enough for panel drawing.
+    """
     if _session is not None:
-        return True
+        return None
     try:
         get()
-    except SetupError:
+    except ConverterMissing as exc:
+        return "converter", str(exc)
+    except SetupError as exc:
+        return "game", str(exc)
+    return None
+
+
+def check_game_version() -> bool:
+    """Start again from the game files if the game was updated since they were read. True if it was."""
+    if _session is None:
         return False
+    if _session.install.is_valid() and _session.install.version() == _session.cache.game_version:
+        return False
+    reset()
     return True
 
 
 def download_converter() -> Path:
     """Fetch the pinned converter into the cache's tools folder."""
-    install = find_install(_setting("game_dir", ENV_GAME) or None)
-    version = install.version() if install else "unknown"
-    cache = Cache(Path(_setting("cache_dir", ENV_CACHE) or default_cache_root()), version)
+    cache = Cache(Path(_setting("cache_dir", ENV_CACHE) or default_cache_root()), "")
     path = download.download_cli(cache.tools_dir)
     reset()
     return path

@@ -37,6 +37,7 @@ is converted from the game files on your disk, offline.
 3. In the 3D View press **N** and open the **CS2 Rigs** tab. Press **Download Converter** (about 65 MB, once). Blender's
    online access must be allowed under **Preferences > System**.
 4. Press **Refresh**. The first time it reads the game's catalogue and finishes, which takes about half a minute.
+   After that, opening a saved file fills the lists and matches them to the agent in it.
 5. Choose an agent and press **Import Agent**, then **Hold Weapon**, **Apply Finish**, **Load Clip** and **Add Controls**.
 
 The game is found through Steam. If it is somewhere unusual, set **Game Folder** in the add-on preferences.
@@ -158,9 +159,11 @@ the game shows behind its menus.
 ### Cache and log
 
 Converted files live in `%LOCALAPPDATA%\cs2-rigs\cache`, in one folder per game
-version and converter build. A game update starts a new folder; the add-on
-preferences have buttons to clear old ones or everything. Converting everything
-takes about 6 GB.
+version and converter build. A game update starts a new folder; press **Refresh**
+after one. The add-on preferences have buttons to clear old folders or everything.
+Clearing old folders keeps their built maps, since saved files may link to them.
+A map whose file is gone shows in the Map box: **Add Map** links it to a new build,
+and **X** takes it out. Converting everything takes about 6 GB.
 
 Each step is written to `cs2-rigs.log`, next to the cache by default. **Cache
 Folder** and **Log Folder** in the preferences move them anywhere else, and **Open

@@ -258,8 +258,17 @@ def add_shapes(armature: bpy.types.Object) -> int:
 
 
 def remove_shapes(armature: bpy.types.Object) -> None:
+    widgets = set()
     for pose_bone in armature.pose.bones:
         if pose_bone.custom_shape is not None and pose_bone.custom_shape.name.startswith(WIDGET_PREFIX):
-            widget = pose_bone.custom_shape
+            widgets.add(pose_bone.custom_shape)
             pose_bone.custom_shape = None
-            bpy.data.objects.remove(widget, do_unlink=True)
+    # A duplicated agent shares its widgets with the original: keep those still in use.
+    in_use = {
+        pose_bone.custom_shape
+        for obj in bpy.data.objects
+        if obj.type == "ARMATURE" and obj.pose is not None
+        for pose_bone in obj.pose.bones
+        if pose_bone.custom_shape is not None
+    }
+    bpy.data.batch_remove([widget for widget in widgets if widget not in in_use])

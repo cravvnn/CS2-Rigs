@@ -232,6 +232,14 @@ def worn_skin(armature: bpy.types.Object) -> str:
     return next((obj[SKIN_PROP] for obj in armature.children_recursive if SKIN_PROP in obj.keys()), "")
 
 
+def worn_skin_settings(armature: bpy.types.Object) -> tuple[str, float, int] | None:
+    """The finish on the held weapon with its wear and seed, or None."""
+    root = next((obj for obj in armature.children_recursive if SKIN_PROP in obj.keys()), None)
+    if root is None:
+        return None
+    return root[SKIN_PROP], float(root.get(WEAR_PROP, 0.0)), int(root.get(SEED_PROP, 0))
+
+
 def remove_skin(armature: bpy.types.Object) -> None:
     """Give the held weapon its stock look back."""
     for obj in importer.held_weapon_objects(armature):

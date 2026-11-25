@@ -12,6 +12,7 @@ from pathlib import Path
 import bpy
 
 from .core.catalog import GameMap
+from .core.converter import failure_message
 from .map_build import MAP_NAME_PROP
 from .session import Session
 
@@ -42,8 +43,8 @@ def build_library(session: Session, game_map: GameMap, blender: str) -> Path:
     except (OSError, subprocess.TimeoutExpired) as exc:
         raise RuntimeError(f"Building {game_map.name} did not finish: {exc}") from exc
     if result.returncode != 0 or not library.is_file():
-        tail = (result.stdout + result.stderr).strip().splitlines()[-8:]
-        raise RuntimeError(f"Building {game_map.name} failed:\n" + "\n".join(tail))
+        shutil.rmtree(export_dir, ignore_errors=True)
+        raise RuntimeError(failure_message(f"Building {game_map.name} failed", result.stdout + result.stderr))
     # The library packs its textures, so the converted files are no longer needed.
     shutil.rmtree(export_dir, ignore_errors=True)
     return library
@@ -80,8 +81,37 @@ def maps_in_scene(scene: bpy.types.Scene) -> dict[str, bpy.types.Collection]:
     return {c[MAP_NAME_PROP]: c for c in scene.collection.children_recursive if MAP_NAME_PROP in c.keys()}
 
 
-def add_map(context: bpy.types.Context, library: Path, name: str, link: bool) -> bpy.types.Collection:
-    """Bring a built map into the scene, linked to its library file or as a local copy."""
+def missing_maps() -> dict[str, bpy.types.Library]:
+    """Linked maps whose built file is gone: cleared, or from an older game version."""
+    found = {}
+    for library in bpy.data.libraries:
+        path = Path(bpy.path.abspath(library.filepath))
+        if path.parent.parent.name == "maps" and path.stem == path.parent.name and not path.is_file():
+            found[path.stem] = library
+    return found
+
+
+def remove_missing_map(name: str) -> None:
+    """Drop a missing map's library, and the empty stand-ins Blender keeps for what it linked."""
+    library = missing_maps().get(name)
+    if library is not None:
+        bpy.data.libraries.remove(library)
+
+
+def add_map(context: bpy.types.Context, library: Path, name: str, link: bool) -> bpy.types.Collection | None:
+    """Bring a built map into the scene, linked to its library file or as a local copy.
+
+    A map already linked from a file that is gone is pointed at the new file instead,
+    keeping its place in the scene; that returns None.
+    """
+    missing = missing_maps().get(name)
+    if missing is not None:
+        if link:
+            missing.filepath = str(library)
+            missing.reload()
+            if name in maps_in_scene(context.scene):
+                return None
+        bpy.data.libraries.remove(missing)
     with bpy.data.libraries.load(str(library), link=link) as (source, target):
         if name not in source.collections:
             raise RuntimeError(f"{library.name} does not hold the map '{name}'. Rebuild it.")

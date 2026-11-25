@@ -28,6 +28,12 @@ GAME_FPS = 30
 HIDDEN_PART_MARKERS = ("firstperson", "defusekit")
 
 
+def require_visible(armature: bpy.types.Object) -> None:
+    """Steps that edit the skeleton need it shown: Blender cannot enter Edit or Pose Mode on a hidden object."""
+    if not armature.visible_get():
+        raise RuntimeError(f"{armature.name} is hidden. Unhide it first.")
+
+
 def _make_active(context: bpy.types.Context, obj: bpy.types.Object) -> None:
     for other in context.selected_objects:
         other.select_set(False)
@@ -42,7 +48,17 @@ def working_on(context: bpy.types.Context, armature: bpy.types.Object):
     Importing switches to Object Mode and makes the imported objects active; without
     this an error part-way would leave nothing selected and every button disabled.
     """
+    if armature.name not in context.view_layer.objects:
+        raise RuntimeError(f"{armature.name} is not in this view layer. Link it to a collection in the scene first.")
     was_posing = context.mode == "POSE" and context.active_object == armature
+    # A hidden skeleton cannot be made active or posed; show it for the step and hide it again after.
+    hidden, hidden_viewport = armature.hide_get(), armature.hide_viewport
+    armature.hide_viewport = False
+    armature.hide_set(False)
+    if not armature.visible_get():
+        armature.hide_set(hidden)
+        armature.hide_viewport = hidden_viewport
+        raise RuntimeError(f"{armature.name} cannot be shown. Make its collection visible first.")
     try:
         yield
     finally:
@@ -51,6 +67,11 @@ def working_on(context: bpy.types.Context, armature: bpy.types.Object):
         _make_active(context, armature)
         if was_posing:
             bpy.ops.object.mode_set(mode="POSE")
+        if hidden or hidden_viewport:
+            if context.mode != "OBJECT":
+                bpy.ops.object.mode_set(mode="OBJECT")
+            armature.hide_set(hidden)
+            armature.hide_viewport = hidden_viewport
 
 
 def _import_glb(context: bpy.types.Context, path: Path) -> list[bpy.types.Object]:
@@ -200,7 +221,7 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     remove_weapon(armature)
     meshes = [obj for obj in objects if obj.type == "MESH"]
     has_hd = any("body_hd" in obj.name for obj in meshes)
-    collection = armature.users_collection[0]
+    collection = (armature.users_collection or [context.scene.collection])[0]
     for obj in objects:
         for old in list(obj.users_collection):
             old.objects.unlink(obj)
