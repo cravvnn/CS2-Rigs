@@ -14,5 +14,5 @@ license = ["SPDX:MIT"]
 platforms = ["windows-x64"]
 
 [permissions]
-network = "Download the Source2Viewer-CLI converter from GitHub, and check GitHub for CS2 Rigs updates"
+network = "Download the converter and check GitHub for updates"
 files = "Read the installed game files and cache converted assets"
