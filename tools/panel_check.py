@@ -102,6 +102,18 @@ assert len(full) > len(empty) + 10
 for expected in ("cs2rig_skin", "cs2rig.apply_skin", '["ik_arm_L"]', "Weapon Follows Right Hand", "de_dust2_vanity", "cs2rig_match_clips"):
     assert expected in full, f"the panel did not draw {expected}"
 
+# Every state of the update row draws.
+from cs2_rigs import updater  # noqa: E402
+from cs2_rigs.core import update  # noqa: E402
+
+updater.release = update.Release("9.9.9-alpha", "", "", "CS2_Rigs_9.9.9-alpha_Windows_x64.zip")
+tops = {}
+for state in ("available", "current", "installed", "checking", "failed", "offline"):
+    updater.status = state
+    tops[state] = draw(f"update {state}")[0]
+assert tops["available"] == "Update Available!" and tops["current"] == "CS2-Rigs is Updated", tops
+updater.status, updater.release = "offline", None
+
 # The preferences draw too.
 prefs = Panel()
 prefs.layout = Layout()

@@ -156,7 +156,7 @@ the game shows behind its menus.
 
 ![Dust II from above](docs/map-dust2.png)
 
-### Cache and log
+### Cache
 
 Converted files live in `%LOCALAPPDATA%\cs2-rigs\cache`, in one folder per game
 version and converter build. A game update starts a new folder; press **Refresh**
@@ -164,6 +164,16 @@ after one. The add-on preferences have buttons to clear old folders or everythin
 Clearing old folders keeps their built maps, since saved files may link to them.
 A map whose file is gone shows in the Map box: **Add Map** links it to a new build,
 and **X** takes it out. Converting everything takes about 6 GB.
+
+### Updates
+
+When Blender starts with online access allowed, CS2 Rigs asks GitHub once whether
+a newer release is out; nothing else is sent. The top of the tab then shows
+**Update Available!** or **CS2-Rigs is Updated**. Nothing is installed until you
+press **Update Available!** and confirm; restart Blender afterwards. With online
+access off, no check is made and the tab shows **Check for Updates** instead.
+
+### Log
 
 Each step is written to `cs2-rigs.log`, next to the cache by default. **Cache
 Folder** and **Log Folder** in the preferences move them anywhere else, and **Open

@@ -12,7 +12,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session
+from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, updater
 from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
@@ -281,6 +281,47 @@ class CS2RIG_OT_download_converter(bpy.types.Operator):
             return {"CANCELLED"}
         session.download_converter()
         self.report({"INFO"}, "The converter is ready.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_check_update(bpy.types.Operator):
+    bl_idname = "cs2rig.check_update"
+    bl_label = "Check for Updates"
+    bl_description = "Ask GitHub whether a newer CS2 Rigs is out. Nothing is downloaded until you choose to update"
+
+    def execute(self, context):
+        if not updater.start_check(_addon_version(), asked=True):
+            self.report({"ERROR"}, "Blender is set to work offline. Allow online access in Preferences > System.")
+            return {"CANCELLED"}
+        if bpy.app.background:
+            updater.wait()
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_install_update(bpy.types.Operator):
+    bl_idname = "cs2rig.install_update"
+    bl_label = "Update Available!"
+    bl_description = "Download the newer CS2 Rigs from GitHub and install it over this one. Restart Blender afterwards"
+
+    @classmethod
+    def poll(cls, context):
+        return updater.status == "available" and updater.release is not None
+
+    def invoke(self, context, event):
+        return context.window_manager.invoke_confirm(
+            self,
+            event,
+            title=f"Update to CS2 Rigs {updater.release.version}",
+            message=f"Download CS2 Rigs {updater.release.version} from GitHub and install it over {_addon_version()}? Restart Blender afterwards.",
+            confirm_text="Update",
+        )
+
+    @_reports_errors
+    def execute(self, context):
+        version = updater.release.version
+        package_file = updater.download()
+        updater.install_soon(package_file, __package__, version)
+        self.report({"INFO"}, f"Installing CS2 Rigs {version}. Restart Blender when it is done.")
         return {"FINISHED"}
 
 
@@ -934,6 +975,24 @@ class CS2RIG_OT_remove_map(bpy.types.Operator):
         return {"FINISHED"}
 
 
+def _draw_update(layout) -> None:
+    """The top row: whether a newer CS2 Rigs is out. Updating is always the user's choice."""
+    if updater.status == "available":
+        row = layout.row()
+        row.alert = True
+        row.scale_y = 1.4
+        row.operator("cs2rig.install_update", text="Update Available!", icon="IMPORT")
+        layout.label(text=f"CS2 Rigs {updater.release.version} is out; you have {_addon_version()}.")
+    elif updater.status == "current":
+        layout.label(text="CS2-Rigs is Updated", icon="CHECKMARK")
+    elif updater.status == "installed":
+        layout.label(text="Restart Blender to finish updating.", icon="FILE_REFRESH")
+    elif updater.status == "checking":
+        layout.label(text="Checking for updates...", icon="TIME")
+    else:
+        layout.operator("cs2rig.check_update", icon="URL")
+
+
 class CS2RIG_PT_main(bpy.types.Panel):
     bl_idname = "CS2RIG_PT_main"
     bl_label = "CS2 Rigs"
@@ -944,6 +1003,7 @@ class CS2RIG_PT_main(bpy.types.Panel):
     def draw(self, context):
         layout = self.layout
         wm = context.window_manager
+        _draw_update(layout)
         problem = session.setup_problem() if not _agent_items else None
         if problem is not None and problem[0] == "game":
             col = layout.column()
@@ -1048,6 +1108,8 @@ _classes = (
     CS2RIG_Preferences,
     CS2RIG_ClipName,
     CS2RIG_OT_download_converter,
+    CS2RIG_OT_check_update,
+    CS2RIG_OT_install_update,
     CS2RIG_OT_show_preferences,
     CS2RIG_OT_open_log_folder,
     CS2RIG_OT_clear_cache,
@@ -1081,6 +1143,7 @@ def register():
     if _on_file_loaded not in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.append(_on_file_loaded)
     _start_log()
+    updater.start_check(_addon_version())
     wm = bpy.types.WindowManager
     wm.cs2rig_agent = EnumProperty(name="Agent", description="The agent to import", items=lambda self, context: _agent_items or _PRESS_REFRESH)
     wm.cs2rig_weapon = EnumProperty(name="Weapon", description="The weapon or knife to put in the selected agent's hands", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
