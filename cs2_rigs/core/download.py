@@ -7,6 +7,7 @@ anything is extracted, so an add-on update is what moves users to a new converte
 from __future__ import annotations
 
 import hashlib
+import http.client
 import os
 import shutil
 import sys
@@ -36,7 +37,8 @@ def cli_dir(tools_dir: Path) -> Path:
 
 def installed_cli(tools_dir: Path) -> Path | None:
     path = cli_dir(tools_dir) / CLI_NAME
-    return path if path.is_file() else None
+    # An empty file is what an interrupted copy can leave; it would only fail later.
+    return path if path.is_file() and path.stat().st_size > 0 else None
 
 
 def asset_for_platform(platform: str = sys.platform) -> tuple[str, str, str]:
@@ -61,7 +63,7 @@ def extract_verified(archive: Path, expected_sha256: str, destination: Path) -> 
     actual = sha256_of(archive)
     if actual != expected_sha256:
         raise DownloadError("The converter download is damaged or not the expected file. Try again.")
-    staging = destination.with_name(destination.name + ".partial")
+    staging = destination.with_name(f"{destination.name}.{os.getpid()}.partial")
     shutil.rmtree(staging, ignore_errors=True)
     staging.mkdir(parents=True)
     try:
@@ -90,14 +92,14 @@ def download_cli(tools_dir: Path, timeout: float = 60.0) -> Path:
     if existing is not None:
         return existing
     url, name, digest = asset_for_platform()
-    tools_dir.mkdir(parents=True, exist_ok=True)
-    archive = tools_dir / (name + ".download")
+    archive = tools_dir / f"{name}.{os.getpid()}.download"
     try:
+        tools_dir.mkdir(parents=True, exist_ok=True)
         request = urllib.request.Request(url, headers={"User-Agent": "cs2-rigs"})
         with urllib.request.urlopen(request, timeout=timeout) as response, open(archive, "wb") as out:
             shutil.copyfileobj(response, out, 1 << 20)
         extract_verified(archive, digest, cli_dir(tools_dir))
-    except (urllib.error.URLError, TimeoutError, OSError) as exc:
+    except (urllib.error.URLError, http.client.HTTPException, TimeoutError, OSError) as exc:
         raise DownloadError(f"Could not download the converter: {exc}") from exc
     finally:
         archive.unlink(missing_ok=True)

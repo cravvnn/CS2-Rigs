@@ -15,6 +15,7 @@ CLIP_PREFIX = "animation/anims/"
 # skeleton; viewmodel, chicken and egg clips do not fit an agent.
 WORLD_CLIP_PREFIX = "animation/anims/world/"
 BASE_CLIP = "animation/anims/world/knife/_default_knife/idle_knife"
+AGENT_CLIP_PREFIXES = (WORLD_CLIP_PREFIX, CLIP_PREFIX + "ui_anims/")
 WEAPON_PREFIX = "weapons/models/"
 CATALOG_VERSION = 2
 
@@ -177,7 +178,8 @@ def clips_for_weapon(clips: list[str], weapon: Weapon | None) -> list[str]:
     """Clips for the held weapon: its own folder first (a karambit's own draw), then its
     family's default clips it does not replace, then the shared ones. Takes full clip paths."""
     if weapon is None:
-        return list(clips)
+        # No weapon: every clip made for an agent, without the first-person, chicken and egg ones.
+        return [clip for clip in clips if clip.startswith(AGENT_CLIP_PREFIXES)]
     family = clip_family(weapon)
     base = f"{WORLD_CLIP_PREFIX}{family}/"
     folders = sorted({clipdata.folder_of(clip) for clip in clips if clip.startswith(base)})

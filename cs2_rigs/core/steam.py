@@ -92,8 +92,14 @@ def steam_roots() -> list[Path]:
 def find_install(override: str | os.PathLike | None = None) -> GameInstall | None:
     """Return the CS2 install, preferring an explicit folder when given."""
     if override:
-        install = GameInstall(Path(override))
-        return install if install.is_valid() else None
+        # Also accept the 'game' or 'game/csgo' folder inside the install.
+        folder = Path(override)
+        roots = [folder]
+        if folder.name.lower() == "game":
+            roots.append(folder.parent)
+        elif folder.name.lower() == "csgo" and folder.parent.name.lower() == "game":
+            roots.append(folder.parent.parent)
+        return next((GameInstall(root) for root in roots if GameInstall(root).is_valid()), None)
     for steam in steam_roots():
         libraries = [steam]
         try:

@@ -90,5 +90,24 @@ class Cache:
         return sorted(p for p in self.cache_dir.iterdir() if p.is_dir() and p != self.version_dir)
 
 
+def without_maps(folders: list[Path]) -> tuple[list[Path], list[Path]]:
+    """Split version folders into what can be deleted and the built maps inside them.
+
+    Saved files may link to a built map, so clearing old versions keeps the maps.
+    Returns (folders and files to delete, map folders kept).
+    """
+    delete, kept = [], []
+    for folder in folders:
+        maps = folder / "maps"
+        if not maps.is_dir():
+            delete.append(folder)
+            continue
+        kept += [m for m in maps.iterdir() if m.is_dir()]
+        delete += [p for p in folder.iterdir() if p != maps]
+    return delete, kept
+
+
 def folder_size(path: Path) -> int:
+    if path.is_file():
+        return path.stat().st_size
     return sum(f.stat().st_size for f in path.rglob("*") if f.is_file())

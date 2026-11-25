@@ -309,7 +309,8 @@ def not_shown(values: dict) -> list[str]:
 
 
 def recipe_path(kit_name: str, composite_material_path: str = "") -> str:
-    return composite_material_path or LEGACY_RECIPE.format(name=kit_name)
+    # Paths inside the game package are lower case; a few kit names are not (cu_bizon_Curse).
+    return (composite_material_path or LEGACY_RECIPE.format(name=kit_name)).lower()
 
 
 def _merged(library: dict, path: str, seen=()) -> dict:

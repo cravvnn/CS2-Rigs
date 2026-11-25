@@ -30,6 +30,14 @@ class ConverterError(RuntimeError):
     pass
 
 
+def failure_message(what: str, output: str, lines: int = 8) -> str:
+    """A failure with the tool's last words on the first line, where Blender's status bar shows them."""
+    tail = [line.strip() for line in output.strip().splitlines() if line.strip()][-lines:]
+    if not tail:
+        return f"{what}, without saying why."
+    return f"{what}: {tail[-1]}" + ("\n" + "\n".join(tail[:-1]) if len(tail) > 1 else "")
+
+
 @dataclass(frozen=True)
 class PackageEntry:
     path: str
@@ -111,8 +119,7 @@ class Converter:
         except OSError as exc:
             raise ConverterError(f"Could not start the converter: {exc}") from exc
         if result.returncode != 0:
-            tail = (result.stdout + result.stderr).strip().splitlines()[-8:]
-            raise ConverterError("The converter failed:\n" + "\n".join(tail))
+            raise ConverterError(failure_message("The converter failed", result.stdout + result.stderr))
         return result.stdout
 
     def list_package(self, package: Path, path_filter: str = "", extensions: str = "") -> list[PackageEntry]:

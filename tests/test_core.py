@@ -1,7 +1,7 @@
 from pathlib import Path
 
-from core import catalog, converter, steam
-from core.cache import Cache
+from core import catalog, converter, finish, steam
+from core.cache import Cache, without_maps
 
 LISTING = """\
 agents/models/ctm_sas/ctm_sas.vmdl_c CRC:00d9a1dcca size:563655
@@ -51,6 +51,31 @@ def test_install_version_and_validity(tmp_path):
     assert install.version() == "1.41.9.6-2000942"
     assert steam.find_install(tmp_path) == install
     assert steam.find_install(tmp_path / "missing") is None
+    # The game's own subfolders are taken for the install they belong to.
+    assert steam.find_install(tmp_path / "game") == install
+    assert steam.find_install(content) == install
+
+
+def test_converter_failures_lead_with_the_last_line():
+    message = converter.failure_message("The converter failed", "Reading pak01\n\nError: file not found\n")
+    assert message.splitlines()[0] == "The converter failed: Error: file not found"
+    assert "Reading pak01" in message
+    assert converter.failure_message("The converter failed", "  ") == "The converter failed, without saying why."
+
+
+def test_recipe_paths_are_lower_case():
+    assert finish.recipe_path("cu_bizon_Curse") == "weapons/paints/legacy/cu_bizon_curse.vcompmat"
+
+
+def test_clearing_old_versions_keeps_built_maps(tmp_path):
+    old = tmp_path / "1.0-1"
+    (old / "maps" / "de_dust2").mkdir(parents=True)
+    (old / "models").mkdir()
+    (old / "catalog.json").write_text("{}")
+    (tmp_path / "0.9-1" / "models").mkdir(parents=True)
+    delete, kept = without_maps([old, tmp_path / "0.9-1"])
+    assert sorted(delete) == sorted([old / "models", old / "catalog.json", tmp_path / "0.9-1"])
+    assert kept == [old / "maps" / "de_dust2"]
 
 
 def test_cache_paths_are_flat_and_stable(tmp_path):
@@ -161,6 +186,14 @@ def test_download_rejects_wrong_hash_and_unsafe_paths(tmp_path):
     else:
         raise AssertionError("unsupported platforms must be reported")
 
+    # An empty converter, as an interrupted copy leaves, does not count as installed.
+    tools = tmp_path / "tools3"
+    download.cli_dir(tools).mkdir(parents=True)
+    (download.cli_dir(tools) / converter.CLI_NAME).write_bytes(b"")
+    assert download.installed_cli(tools) is None
+    (download.cli_dir(tools) / converter.CLI_NAME).write_bytes(b"exe")
+    assert download.installed_cli(tools) is not None
+
 
 def test_export_requires_a_clip(tmp_path):
     conv = converter.Converter(tmp_path / "missing.exe")
@@ -241,7 +274,8 @@ def test_clip_list_puts_the_held_weapons_own_clips_first():
     ak = catalog.Weapon("ak47", "weapons/models/ak47/weapon_rif_ak47.vmdl_c", "rif")
     assert catalog.clips_for_weapon(clips, ak) == [
         world + "rifle/rifle_ak/draw_ak", world + "rifle/_default_rifle/run_n_rifle", world + "shared/flashed"]
-    assert catalog.clips_for_weapon(clips, None) == clips
+    # With no weapon, every agent clip, but not the first-person ones.
+    assert catalog.clips_for_weapon(clips, None) == clips[:-1]
     ordered = sorted(["animation/anims/viewmodel/a", "animation/anims/ui_anims/b", "animation/anims/world/c"], key=catalog.clip_order)
     assert ordered == ["animation/anims/world/c", "animation/anims/ui_anims/b", "animation/anims/viewmodel/a"]
 
