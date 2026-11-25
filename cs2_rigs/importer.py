@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import math
 import os
+import uuid
 from contextlib import contextmanager
 from pathlib import Path
 
@@ -21,6 +22,15 @@ AGENT_KEY_PROP = "cs2rig_agent"
 WEAPON_KEY_PROP = "cs2rig_weapon"
 CLIP_KEY_PROP = "cs2rig_clip"
 COMPOSED_PROP = "cs2rig_composed"  # an additive clip shown over the bind pose
+INSTANCE_PROP = "cs2rig_instance"  # one imported agent, so a job still finds it after a rename
+ROLE_PROP = "cs2rig_role"  # what an imported object is, found without relying on its name
+BODY_KIND_PROP = "cs2rig_body"  # "legacy" or "current" on a weapon body
+AGENT_ROLE = "agent"
+DEFAULT_GLOVES_ROLE = "default_gloves"
+GLOVE_ROLE = "glove"
+WEAPON_ROOT_ROLE = "weapon_root"
+WEAPON_BODY_ROLE = "weapon_body"
+DEFAULT_GLOVES_PART = "thirdperson_default_gloves"  # the agent's own mesh for its hands
 WEAPON_BONE = "wpn"
 WEAPON_ROOT_BONE = "weapon"  # the root bone of weapon models
 GAME_FPS = 30
@@ -137,12 +147,16 @@ def import_agent(context: bpy.types.Context, session: Session, agent: Agent) -> 
         if obj.type == "MESH":
             part = _part_name(obj.name)
             obj.name = f"{agent.label}.{part}"
+            if DEFAULT_GLOVES_PART in part:
+                obj[ROLE_PROP] = DEFAULT_GLOVES_ROLE
             if any(marker in part for marker in HIDDEN_PART_MARKERS):
                 obj.hide_set(True)
                 obj.hide_render = True
 
     armature.name = f"{agent.label}.skeleton"
     armature[AGENT_KEY_PROP] = agent.key
+    armature[ROLE_PROP] = AGENT_ROLE
+    armature[INSTANCE_PROP] = uuid.uuid4().hex
     # The export carries one base clip only so the skeleton exists; start in rest pose.
     if armature.animation_data and armature.animation_data.action:
         base = armature.animation_data.action
@@ -172,7 +186,25 @@ def held_weapon_objects(armature: bpy.types.Object) -> list[bpy.types.Object]:
 
 def held_weapon_root(armature: bpy.types.Object) -> bpy.types.Object | None:
     """The held weapon's skeleton object, which carries its catalogue key."""
-    return next((obj for obj in armature.children_recursive if WEAPON_KEY_PROP in obj.keys()), None)
+    return next(
+        (
+            obj
+            for obj in armature.children_recursive
+            if obj.get(ROLE_PROP) == WEAPON_ROOT_ROLE or WEAPON_KEY_PROP in obj.keys()
+        ),
+        None,
+    )
+
+
+def find_instance(instance: str) -> bpy.types.Object | None:
+    """An imported object by the id stamped on it, whatever it has been renamed to."""
+    return next((obj for obj in bpy.data.objects if obj.get(INSTANCE_PROP) == instance), None)
+
+
+def is_agent(obj: bpy.types.Object | None) -> bool:
+    return obj is not None and obj.type == "ARMATURE" and (
+        obj.get(ROLE_PROP) == AGENT_ROLE or AGENT_KEY_PROP in obj.keys()
+    )
 
 
 def held_weapon_key(armature: bpy.types.Object) -> str:
@@ -229,12 +261,15 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
         if obj.type == "MESH":
             part = _part_name(obj.name)
             obj.name = f"{weapon.key}.{part}"
+            obj[ROLE_PROP] = WEAPON_BODY_ROLE
+            obj[BODY_KIND_PROP] = "legacy" if "legacy" in part else ("current" if "_hd" in part else "part")
             # Weapons ship an older low-detail body next to the current one.
             if has_hd and "legacy" in part:
                 obj.hide_set(True)
                 obj.hide_render = True
     root.name = f"{weapon.key}.weapon"
     root[WEAPON_KEY_PROP] = weapon.key
+    root[ROLE_PROP] = WEAPON_ROOT_ROLE
 
     bone = armature.data.bones[WEAPON_BONE]
     root.parent = armature
@@ -259,7 +294,7 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
 
 def _agent_above(obj: bpy.types.Object | None) -> bpy.types.Object | None:
     while obj is not None:
-        if obj.type == "ARMATURE" and AGENT_KEY_PROP in obj.keys():
+        if is_agent(obj):
             return obj
         obj = obj.parent
     return None
@@ -274,7 +309,7 @@ def find_agent_armature(context: bpy.types.Context) -> bpy.types.Object | None:
         agent = _agent_above(obj)
         if agent is not None:
             return agent
-    agents = [obj for obj in context.scene.objects if obj.type == "ARMATURE" and AGENT_KEY_PROP in obj.keys()]
+    agents = [obj for obj in context.scene.objects if is_agent(obj)]
     return agents[0] if len(agents) == 1 else None
 
 

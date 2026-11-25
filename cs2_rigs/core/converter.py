@@ -14,15 +14,17 @@ import os
 import shutil
 import subprocess
 import sys
-import threading
 import time
 from dataclasses import dataclass
 from pathlib import Path
 
+from . import proc
+
 CLI_NAME = "Source2Viewer-CLI.exe" if sys.platform == "win32" else "Source2Viewer-CLI"
 ENV_CLI = "CS2RIG_S2V_CLI"
 EXPORT_TIMEOUT = 1800
-STAGING_MARK = ".partial-"
+STAGING_MARK = ".partial-"  # what 0.2.x called its staging folders, still cleaned up
+STAGING_PREFIX = "s"  # this version's staging folders are '.s<id>': a short path adds no length
 STAGING_MAX_AGE = 2 * EXPORT_TIMEOUT  # seconds before a staging folder counts as abandoned
 
 
@@ -79,15 +81,32 @@ def exported_path(out_dir: Path, path: str, suffix: str = ".glb") -> Path:
 WINDOWS_MAX_PATH = 259  # characters; Blender cannot open longer paths even with Windows long paths on
 
 
-def _missing_output(staged: Path, path: str, package: Path) -> str:
+def _too_long(path: Path) -> str:
+    """A path Windows cannot open, said plainly, before any work is done."""
+    return (
+        f"The path for {path.name} is {len(str(path))} characters, longer than Windows allows ({WINDOWS_MAX_PATH}). "
+        "Choose a shorter Cache Folder in the add-on preferences, such as C:\\cs2-rigs."
+    )
+
+
+def _missing_output(result: Path, path: str, package: Path) -> str:
     """Why a conversion left no file: usually a path too long for Windows, otherwise the file is not in the package."""
-    length = len(str(staged))
-    if sys.platform == "win32" and length > WINDOWS_MAX_PATH:
-        return (
-            f"The path for {staged.name} is {length} characters, longer than Windows allows ({WINDOWS_MAX_PATH}). "
-            "Choose a shorter Cache Folder in the add-on preferences, such as C:\\cs2-rigs."
-        )
-    return f"The converter finished but did not write {staged.name}. Is '{path}' in {package.name}?"
+    if sys.platform == "win32" and len(str(result)) > WINDOWS_MAX_PATH:
+        return _too_long(result)
+    return f"The converter finished but did not write {result.name}. Is '{path}' in {package.name}?"
+
+
+def _remove_abandoned(parent: Path) -> None:
+    """Delete staging folders a killed run left behind, once they are old enough to be safe."""
+    patterns = (f".{STAGING_PREFIX}*", f"*{STAGING_MARK}*")
+    for pattern in patterns:
+        for old in parent.glob(pattern):
+            try:
+                abandoned = time.time() - old.stat().st_mtime > STAGING_MAX_AGE
+            except OSError:
+                continue
+            if abandoned and old.is_dir():
+                shutil.rmtree(old, ignore_errors=True)
 
 
 class Converter:
@@ -105,22 +124,29 @@ class Converter:
     def _run(self, args: list[str], timeout: float) -> str:
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0
         try:
-            result = subprocess.run(
+            process = subprocess.Popen(
                 [str(self.cli), *args],
-                capture_output=True,
+                stdout=subprocess.PIPE,
+                stderr=subprocess.PIPE,
                 text=True,
                 encoding="utf-8",
                 errors="replace",
-                timeout=timeout,
                 creationflags=flags,
             )
-        except subprocess.TimeoutExpired as exc:
-            raise ConverterError(f"The converter did not finish within {timeout:.0f} s.") from exc
         except OSError as exc:
             raise ConverterError(f"Could not start the converter: {exc}") from exc
-        if result.returncode != 0:
-            raise ConverterError(failure_message("The converter failed", result.stdout + result.stderr))
-        return result.stdout
+        proc.track(process)
+        try:
+            stdout, stderr = process.communicate(timeout=timeout)
+        except subprocess.TimeoutExpired as exc:
+            proc.kill_tree(process)
+            process.communicate()
+            raise ConverterError(f"The converter did not finish within {timeout:.0f} s.") from exc
+        finally:
+            proc.discard(process)
+        if process.returncode != 0:
+            raise ConverterError(failure_message("The converter failed", (stdout or "") + (stderr or "")))
+        return stdout or ""
 
     def list_package(self, package: Path, path_filter: str = "", extensions: str = "") -> list[PackageEntry]:
         args = ["-i", str(package), "--vpk_list"]
@@ -157,6 +183,7 @@ class Converter:
             )
         except OSError as exc:
             raise ConverterError(f"Could not start the converter: {exc}") from exc
+        proc.track(process)
         started = time.monotonic()
         try:
             for line in process.stdout:
@@ -167,7 +194,8 @@ class Converter:
                 raise ConverterError(f"The converter failed with exit code {process.returncode}.")
         finally:
             if process.poll() is None:
-                process.kill()
+                proc.kill_tree(process)
+            proc.discard(process)
             process.stdout.close()
 
     def export_clip(self, package: Path, clip: str, out_dir: Path, compose_additive: bool = False) -> Path:
@@ -198,28 +226,37 @@ class Converter:
 
         A finished conversion is reused. A new one is written to a staging folder and
         moved into place only when the converter succeeds, so an interrupted run
-        never leaves a half-written file that looks finished.
+        never leaves a half-written file that looks finished. The staging folder's
+        name is short: the path already has to fit Windows, and the old name added
+        22 characters to it.
         """
         result = exported_path(out_dir, path, suffix)
         if result.is_file():
             return result
-        # Staging is per process, so two Blenders converting the same thing cannot collide.
-        staging = out_dir.with_name(f"{out_dir.name}{STAGING_MARK}{os.getpid()}-{threading.get_ident()}")
-        out_dir.parent.mkdir(parents=True, exist_ok=True)
-        abandoned = [p for p in out_dir.parent.glob(out_dir.name + STAGING_MARK + "*") if time.time() - p.stat().st_mtime > STAGING_MAX_AGE]
-        for leftover in (staging, out_dir, *abandoned):
-            shutil.rmtree(leftover, ignore_errors=True)
-        staging.mkdir()
+        if sys.platform == "win32" and len(str(result)) > WINDOWS_MAX_PATH:
+            raise ConverterError(_too_long(result))
+        # Staging is per process and thread, so two Blenders converting the same thing cannot collide.
+        staging = out_dir.parent / proc.staging_name(STAGING_PREFIX)
         try:
+            out_dir.parent.mkdir(parents=True, exist_ok=True)
+            _remove_abandoned(out_dir.parent)
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
             self._run(["-i", str(package), "-o", str(staging), "-d", "-f", path, *options], timeout=EXPORT_TIMEOUT)
             staged = exported_path(staging, path, suffix)
             if not staged.is_file():
-                raise ConverterError(_missing_output(staged, path, package))
+                raise ConverterError(_missing_output(result, path, package))
             try:
                 staging.replace(out_dir)
             except OSError:
-                if not result.is_file():  # otherwise another Blender finished the same conversion first
-                    raise
+                if result.is_file():
+                    pass  # another Blender finished the same conversion first
+                else:
+                    # The folder was there but held no finished file for us; add ours to it
+                    # rather than deleting whatever another Blender may be writing.
+                    shutil.copytree(staging, out_dir, dirs_exist_ok=True)
+                    if not result.is_file():
+                        raise
         except OSError as exc:
             raise ConverterError(f"Could not store the converted files in {out_dir}: {exc}") from exc
         finally:

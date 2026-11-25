@@ -8,6 +8,7 @@ textures are composed from the game's glove shader inputs, once for each hand.
 
 from __future__ import annotations
 
+import shutil
 import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
@@ -19,14 +20,14 @@ from . import importer, paint
 from .core import catalog as catalog_mod
 from .core import composite
 from .core import gloves as gloves_mod
-from .core import png
+from .core import png, proc
 from .core import skins as skins_mod
 from .session import Session, SetupError
 
 GLOVE_PROP = "cs2rig_gloves"  # on the glove mesh: the finish it wears
 WEAR_PROP = "cs2rig_gloves_wear"
 SEED_PROP = "cs2rig_gloves_seed"
-DEFAULT_GLOVES = "thirdperson_default_gloves"  # the agent's own mesh for its hands
+DEFAULT_GLOVES = importer.DEFAULT_GLOVES_PART  # the agent's own mesh for its hands
 MESH_PART = "worldmodel"  # the third-person mesh of a glove model
 TEXTURE_SIZE = 2048
 EXPORT_WORKERS = 4  # textures converted at once; the converter's staging is per process and thread
@@ -34,7 +35,14 @@ SHEEN_NODE = "CS2Rig Sheen"  # the image node that feeds the cloth sheen
 
 
 def _default_gloves(armature: bpy.types.Object) -> bpy.types.Object | None:
-    return next((obj for obj in armature.children_recursive if obj.type == "MESH" and DEFAULT_GLOVES in obj.name), None)
+    """The agent's own gloves mesh, which a glove finish replaces.
+
+    Files imported by 0.3.0 carry a role property, so renaming the mesh does not
+    lose it; older files are matched by their importer-given name.
+    """
+    meshes = [obj for obj in armature.children_recursive if obj.type == "MESH"]
+    stamped = next((obj for obj in meshes if obj.get(importer.ROLE_PROP) == importer.DEFAULT_GLOVES_ROLE), None)
+    return stamped or next((obj for obj in meshes if DEFAULT_GLOVES in obj.name), None)
 
 
 def _glove_meshes(armature: bpy.types.Object) -> list[bpy.types.Object]:
@@ -111,6 +119,7 @@ def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object)
         if modifier.type == "ARMATURE":
             modifier.object = armature
     mesh.name = f"{armature.name.removesuffix('.skeleton')}.gloves"
+    mesh[importer.ROLE_PROP] = importer.GLOVE_ROLE
     return mesh
 
 
@@ -125,7 +134,14 @@ def _hand_files(session: Session, kit: skins_mod.PaintKit, left: bool, wear: flo
 HANDS = (True, False)  # left, right
 
 
-def _compose_and_save(session: Session, kit: skins_mod.PaintKit, wear: float, seed: int, work: dict[bool, tuple[dict, dict]]) -> None:
+def _compose_and_save(
+    session: Session,
+    kit: skins_mod.PaintKit,
+    wear: float,
+    seed: int,
+    work: dict[bool, tuple[dict, dict]],
+    should_stop=lambda: False,
+) -> None:
     """Compose each hand's finish and save its images. Needs no Blender.
 
     The hands are composed one after the other: each one needs several GB of
@@ -136,6 +152,8 @@ def _compose_and_save(session: Session, kit: skins_mod.PaintKit, wear: float, se
     with ThreadPoolExecutor(max_workers=1, thread_name_prefix="cs2rig-glove-save") as saver:
         saving = []
         for left in list(work):
+            if should_stop():
+                break
             values, textures = work.pop(left)
             result = gloves_mod.compose(values, textures, TEXTURE_SIZE, wear)
             saving.append(saver.submit(_save_hand, _hand_files(session, kit, left, wear, seed), result))
@@ -173,9 +191,12 @@ class GloveJob:
             raise RuntimeError("This agent has no gloves mesh to replace.")
         self.session, self.kit, self.seed = session, kit, seed
         self.wear = min(max(wear, kit.wear_min), kit.wear_max)
-        self.armature_name = armature.name
+        self.armature_name = armature.name  # files from 0.2.x have no instance id
+        self.instance = armature.get(importer.INSTANCE_PROP, "")
         self.stage = "Converting the game's files"
         self.cancelled = False
+        self._tracker = proc.Tracker()
+        self._out_dirs: list[Path] = []  # hand finishes this job is making
         self._phase = "prepare"
         self._error: BaseException | None = None
         self._glb: Path | None = None
@@ -186,11 +207,27 @@ class GloveJob:
     def _run(self, work) -> None:
         def guarded():
             try:
-                work()
+                with proc.tracked(self._tracker):
+                    work()
             except BaseException as exc:  # raised again on the main thread
                 self._error = exc
         self._thread = threading.Thread(target=guarded, name="cs2rig-gloves", daemon=True)
         self._thread.start()
+
+    def cancel(self) -> None:
+        """Stop now: kill the converter and drop any hand finish that was being made."""
+        self.cancelled = True
+        self._tracker.cancel()
+        for folder in list(self._out_dirs):
+            shutil.rmtree(folder, ignore_errors=True)
+
+    def armature(self) -> bpy.types.Object | None:
+        """The agent this job is for, by its stamped id so a rename does not lose it."""
+        if self.instance:
+            found = importer.find_instance(self.instance)
+            if found is not None:
+                return found
+        return bpy.data.objects.get(self.armature_name)
 
     @property
     def busy(self) -> bool:
@@ -205,9 +242,12 @@ class GloveJob:
         values_by_hand: dict[bool, dict] = {}
         pending: dict[tuple[str, bool], None] = {}
         for left in HANDS:
+            if self.cancelled:
+                return
             files, _sheen = _hand_files(self.session, self.kit, left, wear, self.seed)
             if all(path.is_file() for path in files.values()):
                 continue
+            self._out_dirs.append(files["colour"].parent)
             values = self.session.glove_values(self.kit, left, self.seed, wear)
             values_by_hand[left] = values
             raw_names = gloves_mod.raw_texture_names(values)
@@ -233,23 +273,23 @@ class GloveJob:
         self._paths = {}
 
     def _compose(self) -> None:
-        _compose_and_save(self.session, self.kit, self.wear, self.seed, self._work)
+        _compose_and_save(self.session, self.kit, self.wear, self.seed, self._work, should_stop=lambda: self.cancelled)
         self._work = {}
 
     def step(self, context: bpy.types.Context) -> bool:
         """Move the job on from the main thread. True once the gloves are on."""
         if self.busy:
             return False
-        if self._error is not None:
-            raise self._error
         if self.cancelled:
             return True
+        if self._error is not None:
+            raise self._error
         if self._phase == "prepare":
             self._read_textures()
             self._phase, self.stage = "compose", "Composing the finish"
             self._run(self._compose)
             return False
-        armature = bpy.data.objects.get(self.armature_name)
+        armature = self.armature()
         if armature is None or armature.type != "ARMATURE":
             raise RuntimeError("The agent was removed before its gloves were ready.")
         _put_on(context, self.session, armature, self.kit, self._glb, self.wear, self.seed)

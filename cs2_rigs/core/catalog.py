@@ -6,7 +6,7 @@ import json
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
-from . import clipdata
+from . import clipdata, proc
 from .converter import Converter, PackageEntry
 
 AGENT_PREFIX = "agents/models/"
@@ -133,9 +133,9 @@ def load_or_build_catalog(converter: Converter, package: Path, cache_file: Path,
         pass
     data = build_catalog(converter, package, entries)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_file.with_suffix(".tmp")
+    tmp = proc.temp_name(cache_file)
     tmp.write_text(json.dumps(data), encoding="utf-8")
-    tmp.replace(cache_file)
+    proc.replace_file(tmp, cache_file)
     return data
 
 

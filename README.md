@@ -148,9 +148,10 @@ them off again and leaves the agent as imported.
 
 Choose a map and press **Add Map**. The first time, the map is converted and built
 into its own .blend in the cache, which takes a few minutes and about 1 GB per
-map; Blender stays usable meanwhile. After that it is added in seconds. With
-**Link** ticked the scene links to that file and stays small; unticked, the map is
-copied into the scene.
+map; Blender stays usable meanwhile, and the **X** next to the progress stops it.
+After that it is added in seconds. With **Link** ticked the scene links to that
+file and stays small; unticked, the map is copied into the scene. Built maps stay
+in the cache across game updates; a map built from older game files still loads.
 
 Maps come with the game's sun but no baked lighting, so a scene without a world
 gets a plain sky for fill light. Names ending in `_vanity` are the small scenes
@@ -162,10 +163,12 @@ the game shows behind its menus.
 
 Converted files live in `%LOCALAPPDATA%\cs2-rigs\cache`, in one folder per game
 version and converter build. A game update starts a new folder; press **Refresh**
-after one. The add-on preferences have buttons to clear old folders or everything.
-Clearing old folders keeps their built maps, since saved files may link to them.
-A map whose file is gone shows in the Map box: **Add Map** links it to a new build,
-and **X** takes it out. Converting everything takes about 6 GB.
+after one. Built maps are kept in `%LOCALAPPDATA%\cs2-rigs\maps` instead, so a
+game update does not strand them or make them rebuild. The add-on preferences have
+buttons to clear old folders or everything. Clearing old folders moves their built
+maps to the maps folder first; clearing everything deletes the maps too. A map
+whose file is gone shows in the Map box: **Add Map** links it to a new build, and
+**X** takes it out. Converting everything takes about 6 GB.
 
 ### Updates
 
@@ -210,8 +213,9 @@ This is an alpha. Not done yet:
 - **Controls:** no torso or hip controls; twist bone weights are estimates.
 - **Third person only;** first-person arms are not set up.
 - **Long paths:** Blender cannot open files whose path is over 259 characters. With a
-  long Windows user name or a deep **Cache Folder** some conversions fail with an error
-  saying so; choose a short Cache Folder such as `C:\cs2-rigs`.
+  long Windows user name or a deep **Cache Folder** a conversion fails before it starts,
+  with an error saying how long the file's path would be; choose a short Cache Folder
+  such as `C:\cs2-rigs`.
 
 ## Support
 

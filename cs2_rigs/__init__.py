@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import atexit
 import functools
 import platform
 import shutil
@@ -17,6 +18,7 @@ from .core import cache as cache_mod
 from .core import log as log_mod
 from .core import catalog as catalog_mod
 from .core import gloves as gloves_mod
+from .core import proc
 from .core import skins as skins_mod
 from .core.download import CLI_VERSION
 
@@ -35,6 +37,18 @@ _map_job: maps.BuildJob | None = None
 _preview_job: clip_previews.PreviewJob | None = None
 _glove_job: gloves.GloveJob | None = None
 _finish_job: paint.FinishJob | None = None
+_exit_hooked = False
+
+
+def _cancel_jobs() -> None:
+    """Stop every running job, so no converter or background Blender outlives Blender."""
+    for job in (_map_job, _preview_job, _glove_job):
+        if job is not None:
+            job.cancel()
+    if _finish_job is not None:
+        _finish_job.cancelled = True
+    proc.kill_all()
+
 
 _PRESS_REFRESH = [("NONE", "Press Refresh", "Read the lists from the game first")]
 
@@ -202,9 +216,12 @@ def _sync_to_scene(context: bpy.types.Context) -> None:
 
 @bpy.app.handlers.persistent
 def _on_file_loaded(*_args) -> None:
-    """After a file opens, fill the lists from the cache (when it is already there) and match the scene."""
+    """After a file opens, relink maps and fill the lists from the cache when it is already there."""
     context = bpy.context
     try:
+        relinked = maps.relink_linked_maps(session.cache_root() / "maps")
+        if relinked:
+            log_mod.logger.info("relinked %d map(s) to the maps folder", relinked)
         if not _agent_items:
             if session.setup_problem() is not None:
                 return
@@ -396,8 +413,10 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
         cache = session.get().cache
         if self.everything:
             targets, kept = cache.stale_dirs() + ([cache.version_dir] if cache.version_dir.is_dir() else []), []
+            if cache.map_root.is_dir():
+                targets += [cache.map_root]
         else:
-            targets, kept = cache_mod.without_maps(cache.stale_dirs())
+            targets, kept = cache_mod.without_maps(cache.stale_dirs(), cache.map_root)
         before = sum(cache_mod.folder_size(target) for target in targets)
         for target in targets:
             if target.is_dir():
@@ -536,6 +555,10 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         return _preview_job
 
     def _finish(self, job) -> set[str]:
+        if job.cancelled:
+            log_mod.logger.info("clip previews cancelled after %d clips", job.done)
+            self.report({"INFO"}, "Stopped building clip previews.")
+            return {"CANCELLED"}
         if job.error:
             log_mod.logger.error("building clip previews failed: %s", job.error)
             self.report({"ERROR"}, job.error)
@@ -564,8 +587,11 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         return {"RUNNING_MODAL"}
 
     def modal(self, context, event):
-        if event.type != "TIMER" or _preview_job is None:
+        if event.type != "TIMER":
             return {"PASS_THROUGH"}
+        if _preview_job is None:
+            context.window_manager.event_timer_remove(self._timer)
+            return {"CANCELLED"}
         for area in context.screen.areas if context.screen else ():
             if area.type == "VIEW_3D":
                 area.tag_redraw()
@@ -573,6 +599,58 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
             return {"PASS_THROUGH"}
         context.window_manager.event_timer_remove(self._timer)
         return self._finish(_preview_job)
+
+
+class CS2RIG_OT_cancel_clip_previews(bpy.types.Operator):
+    bl_idname = "cs2rig.cancel_clip_previews"
+    bl_label = "Cancel Clip Previews"
+    bl_description = "Stop building clip previews now and close the background Blender"
+
+    @classmethod
+    def poll(cls, context):
+        return _preview_job is not None and _preview_job.running
+
+    @_reports_errors
+    def execute(self, context):
+        if _preview_job is not None:
+            _preview_job.cancel()
+        self.report({"INFO"}, "Stopping the clip previews.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_cancel_map_build(bpy.types.Operator):
+    bl_idname = "cs2rig.cancel_map_build"
+    bl_label = "Cancel Map Build"
+    bl_description = "Stop building the map now and remove its partial files"
+
+    @classmethod
+    def poll(cls, context):
+        return _building() is not None
+
+    @_reports_errors
+    def execute(self, context):
+        job = _building()
+        if job is not None:
+            job.cancel()
+        self.report({"INFO"}, "Stopping the map build.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_cancel_gloves(bpy.types.Operator):
+    bl_idname = "cs2rig.cancel_gloves"
+    bl_label = "Cancel Gloves"
+    bl_description = "Stop making the glove finish now and remove the half-made images"
+
+    @classmethod
+    def poll(cls, context):
+        return _glove_job is not None and not _glove_job.cancelled
+
+    @_reports_errors
+    def execute(self, context):
+        if _glove_job is not None:
+            _glove_job.cancel()
+        self.report({"INFO"}, "Stopping the gloves.")
+        return {"FINISHED"}
 
 
 class CS2RIG_OT_attach_weapon(_AgentOperator):
@@ -775,7 +853,7 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
         return {"FINISHED"}
 
     def _step(self, context, job: gloves.GloveJob) -> bool:
-        armature = bpy.data.objects.get(job.armature_name)
+        armature = job.armature()
         if armature is None:
             return job.step(context)  # reports that the agent is gone
         with importer.working_on(context, armature):
@@ -817,7 +895,9 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
             return {"PASS_THROUGH"}
         if job is None or job.cancelled:
             context.window_manager.event_timer_remove(self._timer)
-            _glove_job = None
+            # Keep the job while its thread lives, so Apply Gloves stays disabled.
+            if job is None or not job.busy:
+                _glove_job = None
             return {"CANCELLED"}
         try:
             done = self._step(context, job)
@@ -845,7 +925,7 @@ def _redraw_panels(context) -> None:
 def _forget_glove_job(*_args) -> None:
     """A file being opened ends a glove job: its agent belongs to the file being closed."""
     if _glove_job is not None:
-        _glove_job.cancelled = True
+        _glove_job.cancel()
 
 
 @bpy.app.handlers.persistent
@@ -1003,7 +1083,7 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
         try:
             game_map = self._chosen(context)
             current = session.get()
-            library = maps.library_path(current, game_map)
+            library = maps.prepare_library(current, game_map)
             if library.is_file():
                 return self._add(context, library, game_map)
         except RuntimeError as exc:
@@ -1018,8 +1098,11 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
         return {"RUNNING_MODAL"}
     def modal(self, context, event):
         global _map_job
-        if event.type != "TIMER" or _map_job is None:
+        if event.type != "TIMER":
             return {"PASS_THROUGH"}
+        if _map_job is None:
+            context.window_manager.event_timer_remove(self._timer)
+            return {"CANCELLED"}
         for area in context.screen.areas if context.screen else ():
             if area.type == "VIEW_3D":
                 area.tag_redraw()  # keeps the elapsed time in the panel moving
@@ -1027,6 +1110,10 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             return {"PASS_THROUGH"}
         job, _map_job = _map_job, None
         context.window_manager.event_timer_remove(self._timer)
+        if job.cancelled:
+            log_mod.logger.info("stopped building %s", job.game_map.name)
+            self.report({"INFO"}, f"Stopped building {job.game_map.name}.")
+            return {"CANCELLED"}
         if job.error:
             log_mod.logger.error("building %s failed: %s", job.game_map.name, job.error)
             self.report({"ERROR"}, job.error)
@@ -1113,12 +1200,14 @@ class CS2RIG_PT_main(bpy.types.Panel):
             row = box.row(align=True)
             row.prop(wm, "cs2rig_glove_wear", slider=True)
             row.prop(wm, "cs2rig_glove_seed")
-            row = box.row(align=True)
             if _glove_job is not None and not _glove_job.cancelled:
+                row = box.row(align=True)
                 row.label(text=f"{_glove_job.stage}...", icon="TIME")
+                row.operator("cs2rig.cancel_gloves", text="", icon="X")
             else:
+                row = box.row(align=True)
                 row.operator("cs2rig.apply_gloves", icon="BRUSH_DATA")
-            row.operator("cs2rig.remove_gloves", text="", icon="X")
+                row.operator("cs2rig.remove_gloves", text="", icon="X")
 
         box = layout.box()
         box.label(text="Weapon")
@@ -1146,7 +1235,9 @@ class CS2RIG_PT_main(bpy.types.Panel):
         row.operator("cs2rig.load_clip", icon="PLAY")
         row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
         if _preview_job is not None and _preview_job.running:
-            box.label(text=_preview_job.progress, icon="TIME")
+            row = box.row(align=True)
+            row.label(text=_preview_job.progress, icon="TIME")
+            row.operator("cs2rig.cancel_clip_previews", text="", icon="X")
         else:
             box.operator("cs2rig.build_clip_previews", icon="ARMATURE_DATA")
 
@@ -1175,7 +1266,9 @@ class CS2RIG_PT_main(bpy.types.Panel):
         box.prop(wm, "cs2rig_map_link")
         job = _building()
         if job is not None:
-            box.label(text=f"Building {job.game_map.name}  {job.elapsed}", icon="TIME")
+            row = box.row(align=True)
+            row.label(text=f"Building {job.game_map.name}  {job.elapsed}", icon="TIME")
+            row.operator("cs2rig.cancel_map_build", text="", icon="X")
         else:
             box.operator("cs2rig.add_map", icon="WORLD")
         for name in maps.maps_in_scene(context.scene):
@@ -1203,6 +1296,9 @@ _classes = (
     CS2RIG_OT_fix_eyes,
     CS2RIG_OT_load_clip,
     CS2RIG_OT_build_clip_previews,
+    CS2RIG_OT_cancel_clip_previews,
+    CS2RIG_OT_cancel_map_build,
+    CS2RIG_OT_cancel_gloves,
     CS2RIG_OT_attach_weapon,
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
@@ -1220,8 +1316,12 @@ _classes = (
 
 
 def register():
+    global _exit_hooked
     for cls in _classes:
         bpy.utils.register_class(cls)
+    if not _exit_hooked:
+        atexit.register(_cancel_jobs)
+        _exit_hooked = True
     clip_browser.register()
     if _forget_glove_job not in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.append(_forget_glove_job)
@@ -1281,6 +1381,7 @@ def register():
 
 
 def unregister():
+    global _exit_hooked, _map_job, _preview_job, _glove_job, _finish_job
     clip_browser.unregister()
     if _forget_glove_job in bpy.app.handlers.load_pre:
         bpy.app.handlers.load_pre.remove(_forget_glove_job)
@@ -1288,14 +1389,15 @@ def unregister():
         bpy.app.handlers.load_pre.remove(_forget_finish_job)
     if _on_file_loaded in bpy.app.handlers.load_post:
         bpy.app.handlers.load_post.remove(_on_file_loaded)
-    _forget_glove_job()
-    _forget_finish_job()
+    _cancel_jobs()
+    _map_job = _preview_job = _glove_job = _finish_job = None
+    if _exit_hooked:
+        atexit.unregister(_cancel_jobs)
+        _exit_hooked = False
     wm = bpy.types.WindowManager
     for name in ("cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)
-    if _preview_job is not None:
-        _preview_job.cancel()  # stops its background Blender
     session.reset()
     log_mod.close()

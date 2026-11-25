@@ -33,7 +33,7 @@ library = maps.library_path(session.get(), cs2_rigs._maps[name])
 started = time.time()
 assert bpy.ops.cs2rig.add_map() == {"FINISHED"}
 print(f"MAP added in {time.time() - started:.0f} s, library {library.stat().st_size / 1e6:.0f} MB")
-assert not (library.parent / "export").exists(), "the converted files were left behind"
+assert not list(library.parent.glob("export*")), "the converted files were left behind"
 assert scene.world is not None, "no sky was added"
 print("MAP sky nodes:", [n.type for n in scene.world.node_tree.nodes] if scene.world.node_tree else None)
 top = maps.maps_in_scene(scene)[name]
@@ -85,7 +85,7 @@ for game_map, should_work in ((backdrop, True), (GameMap("no_such_map", str(Path
     print(f"MAP worker {game_map.name}: {job.elapsed}", "ok" if not job.error else job.error.splitlines()[0])
     assert bool(job.error) != should_work
     folder = maps.library_path(session.get(), game_map).parent
-    assert not (folder / "export").exists() and not list(folder.glob("export.partial*"))
+    assert not list(folder.glob("export*")) and not list(folder.glob("*.new.blend*"))
     assert maps.library_path(session.get(), game_map).is_file() == should_work
 wm.cs2rig_map_link = True
 wm.cs2rig_map = backdrop.name

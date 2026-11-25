@@ -8,6 +8,7 @@ import tempfile
 from dataclasses import asdict, dataclass
 from pathlib import Path
 
+from . import proc
 from .catalog import package_entries
 from .converter import Converter
 
@@ -270,7 +271,7 @@ def load_or_build_catalogue(converter: Converter, package: Path, cache_file: Pat
     icons = [entry.path for entry in package_entries(converter, package, entries)]
     kits = paint_kits(items_game, english, icons)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_file.with_suffix(".tmp")
+    tmp = proc.temp_name(cache_file)
     tmp.write_text(json.dumps({"version": CATALOGUE_VERSION, "kits": to_json(kits)}), encoding="utf-8")
-    tmp.replace(cache_file)
+    proc.replace_file(tmp, cache_file)
     return kits

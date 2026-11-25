@@ -14,7 +14,7 @@ from pathlib import Path
 import bpy
 
 from .core import catalog as catalog_mod
-from .core import clipdata, cliprun
+from .core import clipdata, cliprun, proc
 from .session import Session
 
 BUILD_SCRIPT = Path(__file__).with_name("clip_build.py")
@@ -60,19 +60,26 @@ class PreviewJob:
         self.error = ""
         self._cancel = False
         self._process = None
+        self._tracker = proc.Tracker()
         self._thread = threading.Thread(target=self._run, args=(session, bpy.app.binary_path), daemon=True)
         self._thread.start()
 
+    @property
+    def cancelled(self) -> bool:
+        return self._cancel
+
     def cancel(self) -> None:
-        """Stop now: the background Blender is killed here, since the thread may not outlive Blender."""
+        """Stop now: the background Blender and its children are killed here."""
         self._cancel = True
+        self._tracker.cancel()
         process = self._process
-        if process is not None and process.poll() is None:
-            process.kill()
+        if process is not None:
+            proc.kill_tree(process)
 
     def _run(self, session: Session, blender: str) -> None:
         try:
-            self._build(session, blender)
+            with proc.tracked(self._tracker):
+                self._build(session, blender)
         except Exception as exc:  # reported on the main thread
             self.error = str(exc)
 
@@ -81,29 +88,32 @@ class PreviewJob:
         rig = session.rig_export(self.agent)
         folder = work_dir(session)
         folder.mkdir(parents=True, exist_ok=True)
-        census_file = session.cache.clip_census_file()
-        results = folder / "results.jsonl"
-        todo = clips_to_build(session, census)
-        self._since = results.stat().st_size if results.is_file() else 0
-        self._results, self.total, self.stage = results, len(todo), "Loading clips"
-        job = {
-            "cli": str(session.converter.cli), "package": str(session.install.main_package), "rig": str(rig),
-            "census": str(census_file), "scratch": str(folder / "scratch"),
-            "preview_dir": str(session.cache.clip_preview_dir()), "results": str(results), "previews": True,
-        }
-        for chunk in cliprun.chunks(todo):
-            finished = cliprun.run_chunk(blender, BUILD_SCRIPT, {**job, "clips": chunk}, folder, log=lambda _: None,
-                                         should_stop=lambda: self._cancel, started_process=self._started)
+        try:
+            census_file = session.cache.clip_census_file()
+            results = folder / "results.jsonl"
+            todo = clips_to_build(session, census)
+            self._since = results.stat().st_size if results.is_file() else 0
+            self._results, self.total, self.stage = results, len(todo), "Loading clips"
+            job = {
+                "cli": str(session.converter.cli), "package": str(session.install.main_package), "rig": str(rig),
+                "census": str(census_file), "scratch": str(folder / "scratch"),
+                "preview_dir": str(session.cache.clip_preview_dir()), "results": str(results), "previews": True,
+            }
+            for chunk in cliprun.chunks(todo):
+                finished = cliprun.run_chunk(blender, BUILD_SCRIPT, {**job, "clips": chunk}, folder, log=lambda _: None,
+                                             should_stop=lambda: self._cancel, started_process=self._started)
+                write_status(session, census)
+                if not finished:
+                    break
             write_status(session, census)
-            if not finished:
-                break
-        shutil.rmtree(folder / "scratch", ignore_errors=True)
-        write_status(session, census)
+        finally:
+            shutil.rmtree(folder / "scratch", ignore_errors=True)
 
     def _started(self, process) -> None:
         self._process = process
+        proc.track(process)
         if self._cancel:
-            process.kill()
+            proc.kill_tree(process)
 
     @property
     def running(self) -> bool:

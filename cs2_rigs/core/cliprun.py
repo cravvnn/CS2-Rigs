@@ -14,7 +14,7 @@ import time
 from collections.abc import Callable
 from pathlib import Path
 
-from . import clipdata
+from . import clipdata, proc
 
 STALL = 20 * 60  # seconds without a finished clip before Blender is restarted
 POLL = 2.0
@@ -101,16 +101,20 @@ def run_chunk(
         seen, stalled, stopped = len(pending), False, False
         with open(work_dir / "blender.log", "a", encoding="utf-8") as blender_log:
             process = subprocess.Popen(command, stdout=blender_log, stderr=subprocess.STDOUT, creationflags=flags)
+            proc.track(process)
             started_process(process)
-            while process.poll() is None:
-                time.sleep(POLL)
-                left = [c for c in pending if c not in read_results(results_path, since)]
-                if len(left) != seen:
-                    seen, last_change = len(left), time.monotonic()
-                if should_stop() or time.monotonic() - last_change > stall:
-                    stopped, stalled = should_stop(), not should_stop()
-                    process.kill()
-                    process.wait()
+            try:
+                while process.poll() is None:
+                    time.sleep(POLL)
+                    left = [c for c in pending if c not in read_results(results_path, since)]
+                    if len(left) != seen:
+                        seen, last_change = len(left), time.monotonic()
+                    if should_stop() or time.monotonic() - last_change > stall:
+                        stopped, stalled = should_stop(), not should_stop()
+                        proc.kill_tree(process)
+                        process.wait()
+            finally:
+                proc.discard(process)
         if stopped:
             return False
         left = [c for c in pending if c not in read_results(results_path, since)]

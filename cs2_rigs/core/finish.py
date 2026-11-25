@@ -18,6 +18,7 @@ import threading
 from concurrent.futures import ThreadPoolExecutor
 from pathlib import Path
 
+from . import proc
 from .converter import Converter
 
 LIBRARY_VERSION = 2
@@ -346,9 +347,9 @@ def load_or_build_library(converter: Converter, package: Path, cache_file: Path)
         pass
     library = build_library(converter, package)
     cache_file.parent.mkdir(parents=True, exist_ok=True)
-    tmp = cache_file.with_suffix(".tmp")
+    tmp = proc.temp_name(cache_file)
     tmp.write_text(json.dumps(library), encoding="utf-8")
-    tmp.replace(cache_file)
+    proc.replace_file(tmp, cache_file)
     return library
 
 

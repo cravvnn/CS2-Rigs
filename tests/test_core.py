@@ -67,15 +67,33 @@ def test_recipe_paths_are_lower_case():
     assert finish.recipe_path("cu_bizon_Curse") == "weapons/paints/legacy/cu_bizon_curse.vcompmat"
 
 
-def test_clearing_old_versions_keeps_built_maps(tmp_path):
-    old = tmp_path / "1.0-1"
+def test_clearing_old_versions_moves_built_maps_out(tmp_path):
+    old = tmp_path / "cache" / "1.0-1"
     (old / "maps" / "de_dust2").mkdir(parents=True)
+    (old / "maps" / "de_dust2" / "de_dust2.blend").write_bytes(b"blend")
     (old / "models").mkdir()
     (old / "catalog.json").write_text("{}")
-    (tmp_path / "0.9-1" / "models").mkdir(parents=True)
-    delete, kept = without_maps([old, tmp_path / "0.9-1"])
-    assert sorted(delete) == sorted([old / "models", old / "catalog.json", tmp_path / "0.9-1"])
-    assert kept == [old / "maps" / "de_dust2"]
+    other = tmp_path / "cache" / "0.9-1"
+    (other / "models").mkdir(parents=True)
+    delete, kept = without_maps([old, other], tmp_path / "maps")
+    assert kept == []
+    assert (tmp_path / "maps" / "de_dust2" / "de_dust2.blend").read_bytes() == b"blend"
+    assert sorted(delete) == sorted([old, other])
+
+
+def test_clearing_old_versions_keeps_a_map_it_cannot_move(tmp_path, monkeypatch):
+    from core import cache as cache_mod
+
+    old = tmp_path / "cache" / "1.0-1"
+    map_dir = old / "maps" / "de_dust2"
+    map_dir.mkdir(parents=True)
+    (map_dir / "de_dust2.blend").write_bytes(b"blend")
+    (old / "models").mkdir()
+    monkeypatch.setattr(cache_mod.maplib, "move_map", lambda source, target: False)
+    delete, kept = without_maps([old], tmp_path / "maps")
+    assert kept == [map_dir]
+    assert (map_dir / "de_dust2.blend").is_file()
+    assert (old / "maps") not in delete and (old / "models") in delete
 
 
 def test_cache_paths_are_flat_and_stable(tmp_path):
@@ -277,7 +295,8 @@ def test_cache_is_keyed_by_converter_and_lists_stale_folders(tmp_path):
 
     cache = Cache(tmp_path, "1.0-1", "abcd1234")
     assert cache.version_dir.name == "1.0-1-abcd1234"
-    assert cache.map_dir("de_dust2") == cache.version_dir / "maps" / "de_dust2"
+    assert cache.map_dir("de_dust2") == tmp_path / "maps" / "de_dust2"
+    assert cache.map_dir("de_dust2") != cache.version_dir / "maps" / "de_dust2"
     assert cache.stale_dirs() == []
     cache.version_dir.mkdir(parents=True)
     old = cache.cache_dir / "0.9-1"
@@ -304,6 +323,46 @@ def test_export_reuses_finished_work_and_cleans_up_after_failure(tmp_path):
     done.parent.mkdir(parents=True)
     done.write_bytes(b"glb")
     assert conv.export(tmp_path / "p.vpk", "maps/x.vmap_c", out) == done
+
+
+def test_conversion_keeps_another_blenders_files_and_stages_short(tmp_path, monkeypatch):
+    conv = converter.Converter(tmp_path / "missing.exe")
+    out = tmp_path / "textures" / "abcd"
+    out.mkdir(parents=True)
+    (out / "keep.txt").write_text("another Blender's finished file")
+    staging_names = []
+
+    def fake_run(args, timeout):
+        staging = Path(args[args.index("-o") + 1])
+        staging_names.append(staging.name)
+        target = converter.exported_path(staging, "materials/a.vtex_c", ".png")
+        target.parent.mkdir(parents=True)
+        target.write_bytes(b"png")
+        return ""
+
+    monkeypatch.setattr(conv, "_run", fake_run)
+    result = conv.export_texture(tmp_path / "p.vpk", "materials/a.vtex_c", out)
+    assert result.is_file()
+    assert (out / "keep.txt").read_text() == "another Blender's finished file"
+    assert staging_names and staging_names[0].startswith(".s")
+    assert len(staging_names[0]) < 20, staging_names
+    assert not list(out.parent.glob(".s*")), "a staging folder was left behind"
+
+
+def test_a_final_path_too_long_is_reported_before_any_work(tmp_path, monkeypatch):
+    monkeypatch.setattr(converter.sys, "platform", "win32")
+    conv = converter.Converter(tmp_path / "missing.exe")
+    out = tmp_path / ("d" * 240)
+    called = []
+    monkeypatch.setattr(conv, "_run", lambda *args, **kwargs: called.append(args) or "")
+    try:
+        conv.export_texture(tmp_path / "p.vpk", "materials/a.vtex_c", out)
+    except converter.ConverterError as exc:
+        assert "longer than Windows allows" in str(exc) and "Cache Folder" in str(exc)
+    else:
+        raise AssertionError("a path Windows cannot open must be reported")
+    assert not called, "the converter was started for a path that cannot be written"
+    assert not out.exists()
 
 
 def test_clips_are_matched_to_the_held_weapon():

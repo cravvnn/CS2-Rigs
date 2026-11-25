@@ -35,10 +35,18 @@ SHARED_TEXTURES = ("g_tWear", "g_tGrunge")
 
 
 def _bodies(armature: bpy.types.Object) -> tuple[bpy.types.Object | None, bpy.types.Object | None]:
-    """The held weapon's old-layout body and its current one; either can be missing."""
+    """The held weapon's old-layout body and its current one; either can be missing.
+
+    Files imported by 0.3.0 carry the role on each body, so renaming one does not
+    lose it; older files fall back to the names the importer gave them.
+    """
     meshes = [obj for obj in importer.held_weapon_objects(armature) if obj.type == "MESH"]
-    legacy = next((obj for obj in meshes if LEGACY_MARK in obj.name), None)
-    current = next((obj for obj in meshes if CURRENT_MARK in obj.name), None)
+    legacy = next((obj for obj in meshes if obj.get(importer.BODY_KIND_PROP) == "legacy"), None)
+    current = next((obj for obj in meshes if obj.get(importer.BODY_KIND_PROP) == "current"), None)
+    if legacy is None:
+        legacy = next((obj for obj in meshes if LEGACY_MARK in obj.name), None)
+    if current is None:
+        current = next((obj for obj in meshes if CURRENT_MARK in obj.name), None)
     if current is None:
         current = next((obj for obj in meshes if obj is not legacy), None)
     return legacy, current

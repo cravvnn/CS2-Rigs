@@ -233,6 +233,11 @@ def reset() -> None:
     _session = None
 
 
+def cache_root() -> Path:
+    """Where converted files are kept, read without needing the game itself."""
+    return Path(_setting("cache_dir", ENV_CACHE) or default_cache_root())
+
+
 def get() -> Session:
     global _session
     if _session is not None:
@@ -245,8 +250,8 @@ def get() -> Session:
                 f"Counter-Strike 2 is not in {game_dir}. Set Game Folder to the 'Counter-Strike Global Offensive' folder."
             )
         raise SetupError("Counter-Strike 2 was not found. Set the game folder in the add-on preferences.")
-    cache_root = Path(_setting("cache_dir", ENV_CACHE) or default_cache_root())
-    tools_dir = Cache(cache_root, install.version()).tools_dir
+    root = cache_root()
+    tools_dir = Cache(root, install.version()).tools_dir
     cli = find_cli(_setting("converter_path", "CS2RIG_S2V_CLI") or None) or download.installed_cli(tools_dir)
     if cli is None:
         raise ConverterMissing(
@@ -254,7 +259,7 @@ def get() -> Session:
             "or set its path in the add-on preferences."
         )
     converter = Converter(cli)
-    _session = Session(install, converter, Cache(cache_root, install.version(), converter.tag()))
+    _session = Session(install, converter, Cache(root, install.version(), converter.tag()))
     return _session
 
 

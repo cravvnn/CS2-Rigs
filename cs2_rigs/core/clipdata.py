@@ -18,6 +18,7 @@ import re
 from collections.abc import Iterable, Iterator
 from pathlib import Path
 
+from . import proc
 from .converter import Converter
 
 CLIP_PREFIX = "animation/anims/"
@@ -194,9 +195,9 @@ def load_census(path: Path) -> dict | None:
 def write_json(path: Path, data) -> None:
     """Write through a temporary file, so a reader never sees half a file."""
     path.parent.mkdir(parents=True, exist_ok=True)
-    tmp = path.with_name(path.name + ".tmp")
+    tmp = proc.temp_name(path)
     tmp.write_text(json.dumps(data, separators=(",", ":")), encoding="utf-8")
-    tmp.replace(path)
+    proc.replace_file(tmp, path)
 
 
 def load_or_build_census(converter: Converter, package: Path, clips: Iterable[str], cache_file: Path, progress=None) -> dict:

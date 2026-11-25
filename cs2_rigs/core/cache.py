@@ -7,6 +7,8 @@ import os
 import sys
 from pathlib import Path
 
+from . import maplib
+
 APP_DIR_NAME = "cs2-rigs"
 
 
@@ -85,8 +87,13 @@ class Cache:
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]
         return self.version_dir / "textures" / digest
 
+    @property
+    def map_root(self) -> Path:
+        """Built maps live beside the version folders, so a game update does not strand them."""
+        return self.root / "maps"
+
     def map_dir(self, name: str) -> Path:
-        return self.version_dir / "maps" / name
+        return self.map_root / name
 
     def stale_dirs(self) -> list[Path]:
         """Folders left behind by other game versions or converter builds."""
@@ -95,11 +102,12 @@ class Cache:
         return sorted(p for p in self.cache_dir.iterdir() if p.is_dir() and p != self.version_dir)
 
 
-def without_maps(folders: list[Path]) -> tuple[list[Path], list[Path]]:
+def without_maps(folders: list[Path], map_root: Path) -> tuple[list[Path], list[Path]]:
     """Split version folders into what can be deleted and the built maps inside them.
 
-    Saved files may link to a built map, so clearing old versions keeps the maps.
-    Returns (folders and files to delete, map folders kept).
+    Saved files may link to a built map, so before a folder goes its maps are
+    moved to the stable map folder. Returns (folders and files to delete, map
+    folders that could not be moved and are kept).
     """
     delete, kept = [], []
     for folder in folders:
@@ -107,8 +115,15 @@ def without_maps(folders: list[Path]) -> tuple[list[Path], list[Path]]:
         if not maps.is_dir():
             delete.append(folder)
             continue
-        kept += [m for m in maps.iterdir() if m.is_dir()]
-        delete += [p for p in folder.iterdir() if p != maps]
+        left = []
+        for old in [m for m in maps.iterdir() if m.is_dir()]:
+            if not maplib.move_map(old, Path(map_root) / old.name):
+                left.append(old)
+        if left:
+            kept += left
+            delete += [p for p in folder.iterdir() if p != maps]
+        else:
+            delete.append(folder)
     return delete, kept
 
 
