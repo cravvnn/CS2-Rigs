@@ -21,7 +21,7 @@ Import any agent with a posable rig, put a weapon in their hands with the finish
 you want, play the game's own animation clips and stand them in a real map. Everything
 is converted from the game files on your disk, offline.
 
-**Current release: 0.2.0-alpha · Windows x64 · Blender 5.3.**
+**Current release: 0.2.1-alpha · Windows x64 · Blender 5.3.**
 
 > **Alpha.** Expect rough edges and report what breaks. CS2 Rigs only reads the
 > game files on disk. It never opens, injects into or talks to the running game.
