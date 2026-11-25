@@ -177,9 +177,9 @@ version and converter build. A game update starts a new folder; press **Read Gam
 after one. Built maps are kept in `%LOCALAPPDATA%\cs2-rigs\maps` instead, so a
 game update does not strand them or make them rebuild. The add-on preferences have
 buttons to clear old folders or everything. Clearing old folders moves their built
-maps to the maps folder first; clearing everything deletes the maps too. A map
-whose file is gone shows in the Map section: **Add Map** links it to a new build, and
-**X** takes it out. Converting everything takes about 6 GB.
+maps to the maps folder first, and the open file follows them; clearing everything
+deletes the maps too. A map whose file is gone shows in the Map section: choose that
+map and press **Add Map** to link it to a new build, or press **X** to take it out. Converting everything takes about 6 GB.
 
 ### Updates
 

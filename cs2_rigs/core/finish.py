@@ -106,7 +106,11 @@ _TOKEN = re.compile(
 def parse_kv3(text: str):
     """Parse the text form of KeyValues3 the converter prints into dicts, lists and scalars."""
     tokens = []
+    position = 0
     for match in _TOKEN.finditer(text):
+        if text[position:match.start()].strip():
+            raise ValueError(f"unreadable KeyValues3 text at offset {position}")
+        position = match.end()
         kind = match.lastgroup
         if kind == "blob":
             tokens.append(("value", None))
@@ -116,6 +120,8 @@ def parse_kv3(text: str):
             tokens.append(("value", match.group("string").replace('\\"', '"').replace("\\\\", "\\")))
         else:
             tokens.append(("value", _scalar(match.group("word"))))
+    if text[position:].strip():
+        raise ValueError(f"unreadable KeyValues3 text at offset {position}")
 
     def value(i):
         kind, payload = tokens[i]

@@ -7,6 +7,7 @@ started alive, so on Windows `taskkill /T` takes the whole tree.
 
 from __future__ import annotations
 
+import itertools
 import os
 import subprocess
 import sys
@@ -80,6 +81,25 @@ def tracked(tracker: Tracker):
         _LOCAL.tracker = previous
 
 
+def carry(function):
+    """`function`, run under the calling thread's job when a pool runs it on another thread.
+
+    A job's tracker belongs to the thread that runs the job; without this the
+    converters a worker pool starts would not stop when the job is cancelled.
+    """
+    tracker = getattr(_LOCAL, "tracker", None)
+    if tracker is None:
+        return function
+
+    def run(*args, **kwargs):
+        if tracker.cancelled:
+            raise RuntimeError("Cancelled.")
+        with tracked(tracker):
+            return function(*args, **kwargs)
+
+    return run
+
+
 def track(process: subprocess.Popen) -> None:
     """Register a child with the current thread's job and the process-wide list."""
     with _ALL_LOCK:
@@ -110,11 +130,13 @@ def creation_flags() -> int:
     return _CREATE_NO_WINDOW
 
 
+_STAGING_COUNT = itertools.count()
+
+
 def staging_name(prefix: str) -> str:
-    """A short folder name that two processes and two threads cannot share."""
+    """A short folder name that two processes, or two calls in one process, cannot share."""
     pid = os.getpid() & 0xFFFFF
-    thread = threading.get_ident() & 0xFFFF
-    return f".{prefix}{pid:05x}{thread:04x}"
+    return f".{prefix}{pid:05x}{next(_STAGING_COUNT) & 0xFFFF:04x}"
 
 
 def temp_name(path: Path) -> Path:

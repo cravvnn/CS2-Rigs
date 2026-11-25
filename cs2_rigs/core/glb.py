@@ -13,6 +13,8 @@ import struct
 import threading
 from pathlib import Path
 
+from . import proc
+
 Matrix4 = list[list[float]]
 IDENTITY: Matrix4 = [[1.0 if r == c else 0.0 for c in range(4)] for r in range(4)]
 
@@ -127,10 +129,13 @@ def strip_to_skeleton(source: Path, target: Path) -> Path:
     stay as they are, so the imported skeleton and every action built on it are
     the same as from the full file.
     """
+    source, target = Path(source), Path(target)
+    if target.is_file() and target.stat().st_mtime >= source.stat().st_mtime:
+        return target  # made from this model already; rewriting it could clash with a reader
     document, binary = read_glb(source)
     skins = document.get("skins", [])
     if not skins:
-        raise ValueError(f"{Path(source).name} has no skeleton.")
+        raise ValueError(f"{source.name} has no skeleton.")
     accessors, views, data = [], [], bytearray()
     view_map: dict[int, int] = {}
     accessor_map: dict[int, int] = {}
@@ -177,11 +182,10 @@ def strip_to_skeleton(source: Path, target: Path) -> Path:
         "bufferViews": views,
         "buffers": [{"byteLength": len(data)}] if data else [],
     }
-    target = Path(target)
     target.parent.mkdir(parents=True, exist_ok=True)
     partial = target.with_name(f"{target.name}.{os.getpid()}-{threading.get_ident()}.tmp")
     write_glb(partial, stripped, bytes(data))
-    partial.replace(target)
+    proc.replace_file(partial, target)
     return target
 
 

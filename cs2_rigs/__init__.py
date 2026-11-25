@@ -480,6 +480,7 @@ class CS2RIG_OT_clear_cache(bpy.types.Operator):
                 targets += [cache.map_root]
         else:
             targets, kept = cache_mod.without_maps(cache.stale_dirs(), cache.map_root)
+            maps.relink_linked_maps(cache.map_root)  # the open file links the moved maps
         before = sum(cache_mod.folder_size(target) for target in targets)
         for target in targets:
             if target.is_dir():
@@ -628,7 +629,7 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         log_mod.logger.info("building clip previews on %s", agent.key)
         return _preview_job
 
-    def _finish(self, job) -> set[str]:
+    def _finish(self, context, job) -> set[str]:
         if job.cancelled:
             log_mod.logger.info("clip previews cancelled after %d clips", job.done)
             self.report({"INFO"}, "Stopped building clip previews.")
@@ -647,7 +648,7 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         job = self._start(context)
         while job.running:
             time.sleep(1.0)
-        return self._finish(job)
+        return self._finish(context, job)
 
     def invoke(self, context, event):
         try:
@@ -672,7 +673,7 @@ class CS2RIG_OT_build_clip_previews(bpy.types.Operator):
         if _preview_job.running:
             return {"PASS_THROUGH"}
         context.window_manager.event_timer_remove(self._timer)
-        return self._finish(_preview_job)
+        return self._finish(context, _preview_job)
 
 
 class CS2RIG_OT_cancel_clip_previews(bpy.types.Operator):
@@ -1187,8 +1188,9 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
     )
     bl_options = {"REGISTER", "UNDO"}
 
-    name: StringProperty()  # the map a row's Rebuild button points at
-    rebuild: BoolProperty()
+    # Set by a row's Rebuild button only; never remembered for the plain Add Map button.
+    name: StringProperty(options={"SKIP_SAVE"})
+    rebuild: BoolProperty(options={"SKIP_SAVE"})
     _timer = None
 
     @classmethod
@@ -1231,6 +1233,7 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             game_map = self._chosen(context)
             current = session.get()
             library = maps.prepare_library(current, game_map)
+            maps.relink_linked_maps(current.cache.map_root)  # other scenes may link the old place
             if library.is_file() and not self.rebuild:
                 return self._add(context, library, game_map)
         except RuntimeError as exc:

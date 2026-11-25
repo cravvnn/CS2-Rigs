@@ -271,7 +271,13 @@ def add_map(context: bpy.types.Context, library: Path, name: str, link: bool) ->
             missing.reload()
             if name in maps_in_scene(context.scene):
                 return None
-        bpy.data.libraries.remove(missing)
+            # Linked in another scene only: keep that one, and link the same map here.
+            collection = next((c for c in bpy.data.collections if c.library == missing and c.name == name), None)
+            if collection is not None:
+                context.scene.collection.children.link(collection)
+                return collection
+        else:
+            bpy.data.libraries.remove(missing)
     with bpy.data.libraries.load(str(library), link=link) as (source, target):
         if name not in source.collections:
             raise RuntimeError(f"{library.name} does not hold the map '{name}'. Rebuild it.")

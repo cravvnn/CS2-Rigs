@@ -137,6 +137,19 @@ def _cached_finish(out_dir: Path) -> dict | None:
     return files if all(path.is_file() for path in files.values()) else None
 
 
+def _store_missing(out_dir: Path, missing: list[str]) -> None:
+    """Keep the parts a finish does not show beside its images, for when it is reused."""
+    out_dir.mkdir(parents=True, exist_ok=True)
+    (out_dir / "missing.txt").write_text("\n".join(missing), encoding="utf-8")
+
+
+def _stored_missing(out_dir: Path) -> list[str]:
+    try:
+        return [line for line in (out_dir / "missing.txt").read_text(encoding="utf-8").splitlines() if line]
+    except OSError:
+        return []
+
+
 def _wanted_textures(values: dict) -> list[str]:
     """The finish's textures the compositor reads, by shader name."""
     style = int(values.get("F_PAINT_STYLE", 0))
@@ -180,7 +193,7 @@ def _export_textures(session: Session, paths: list[str]) -> dict[str, Path]:
     """Convert a finish's textures a few at a time; returns each shader value's file."""
     unique = list(dict.fromkeys(str(path) for path in paths))
     with ThreadPoolExecutor(max_workers=EXPORT_WORKERS, thread_name_prefix="cs2rig-texture") as pool:
-        return dict(zip(unique, pool.map(session.texture, unique)))
+        return dict(zip(unique, pool.map(proc.carry(session.texture), unique)))
 
 
 def _compose_values(kit: skins_mod.PaintKit, values: dict, textures: dict, wear: float, out_dir: Path, normal: Path | None) -> dict:
@@ -227,9 +240,10 @@ def finish_textures(session: Session, kit: skins_mod.PaintKit, body_material: st
     out_dir = session.cache.finish_dir(_finish_key(kit, body_material, wear, seed))
     files = _cached_finish(out_dir)
     if files is not None:
-        return files, []
+        return files, _stored_missing(out_dir)
     values = session.finish_values(kit, body_material, seed, wear)
     missing = finish_mod.not_shown(values)
+    _store_missing(out_dir, missing)
     return _compose(session, kit, values, wear, out_dir), missing
 
 
@@ -333,6 +347,7 @@ class FinishJob:
         self.wear = min(max(wear, kit.wear_min), kit.wear_max)  # what the scene keeps
         self.paint_wear = round(self.wear, 3)  # what the images are made with, and the cache key
         self.armature_name = armature.name
+        self.instance = importer.instance_id(armature)
         body, self.slot_index, self.body_material = _paint_slot(session, armature, kit)
         self.body_name = body.name
         self.out_dir = session.cache.finish_dir(_finish_key(kit, self.body_material, self.paint_wear, seed))
@@ -349,6 +364,7 @@ class FinishJob:
         self._normal: Path | None = None
         self._files = _cached_finish(self.out_dir)
         if self._files is not None:
+            self.missing = _stored_missing(self.out_dir)
             self._phase, self.stage = "apply", "Applying the finish"
         else:
             self._run(self._prepare)
@@ -381,6 +397,7 @@ class FinishJob:
     def _prepare(self) -> None:
         values = self.session.finish_values(self.kit, self.body_material, self.seed, self.paint_wear)
         self.missing = finish_mod.not_shown(values)
+        _store_missing(self.out_dir, self.missing)
         jobs = _texture_jobs(values)
         normal_path = values.get("g_tNormal")
         exported = _export_textures(self.session, [values[shader] for shader in jobs.values()] + ([normal_path] if normal_path else []))
@@ -393,11 +410,15 @@ class FinishJob:
         self._paths = {}
 
     def _compose(self) -> None:
+        if self.cancelled:
+            return
         self._files = _compose_values(self.kit, self._values, self._textures, self.paint_wear, self.out_dir, self._normal)
         self._textures = {}
+        if self.cancelled:  # cancelled while composing: drop what was written
+            shutil.rmtree(self.out_dir, ignore_errors=True)
 
     def _apply(self) -> None:
-        armature = bpy.data.objects.get(self.armature_name)
+        armature = importer.find_instance(self.instance) or bpy.data.objects.get(self.armature_name)
         if armature is None or armature.type != "ARMATURE":
             raise RuntimeError("The agent was removed before its finish was ready.")
         body = bpy.data.objects.get(self.body_name)

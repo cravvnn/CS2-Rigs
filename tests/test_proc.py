@@ -62,3 +62,26 @@ def test_staging_names_are_short(tmp_path):
     assert name.startswith(".s") and len(name) < 16
     assert proc.temp_name(tmp_path / "catalog.json").name.startswith("catalog.json.")
     assert proc.temp_name(tmp_path / "catalog.json") != tmp_path / "catalog.json"
+
+
+def test_staging_names_differ_between_calls():
+    assert len({proc.staging_name("s") for _ in range(100)}) == 100
+
+
+def test_a_pool_task_reports_to_the_job_that_started_it():
+    from concurrent.futures import ThreadPoolExecutor
+
+    tracker = proc.Tracker()
+    child = subprocess.Popen([sys.executable, "-c", "import time; time.sleep(60)"])
+    try:
+        with proc.tracked(tracker):
+            start = proc.carry(lambda: proc.track(child))
+        with ThreadPoolExecutor(max_workers=1) as pool:
+            pool.submit(start).result()
+        tracker.cancel()
+        assert child.wait(timeout=20) is not None
+    finally:
+        proc.discard(child)
+        if child.poll() is None:
+            child.kill()
+            child.wait()

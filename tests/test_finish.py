@@ -223,7 +223,7 @@ def test_kv3_values():
 
 
 def test_kv3_rejects_broken_text():
-    for text in ("{ a = [ 1, 2 ", "{ a 1 }", "{ a = }"):
+    for text in ("{ a = [ 1, 2 ", "{ a 1 }", "{ a = }", '{ a = "x }'):
         with pytest.raises(ValueError):
             finish.parse_kv3(text)
 

@@ -156,6 +156,8 @@ def _compose_and_save(
                 break
             values, textures = work.pop(left)
             result = gloves_mod.compose(values, textures, TEXTURE_SIZE, wear)
+            if should_stop():
+                break
             saving.append(saver.submit(_save_hand, _hand_files(session, kit, left, wear, seed), result))
             del result
         for job in saving:
@@ -192,7 +194,7 @@ class GloveJob:
         self.session, self.kit, self.seed = session, kit, seed
         self.wear = min(max(wear, kit.wear_min), kit.wear_max)
         self.armature_name = armature.name  # files from 0.2.x have no instance id
-        self.instance = armature.get(importer.INSTANCE_PROP, "")
+        self.instance = importer.instance_id(armature)
         self.stage = "Converting the game's files"
         self.cancelled = False
         self._tracker = proc.Tracker()
@@ -256,7 +258,8 @@ class GloveJob:
         exported: dict[tuple[str, bool], Path] = {}
         if pending:
             with ThreadPoolExecutor(max_workers=EXPORT_WORKERS, thread_name_prefix="cs2rig-texture") as pool:
-                futures = {key: pool.submit(self.session.texture, key[0], raw=key[1]) for key in pending}
+                convert = proc.carry(self.session.texture)
+                futures = {key: pool.submit(convert, key[0], raw=key[1]) for key in pending}
                 for key, future in futures.items():
                     exported[key] = future.result()
         for left, values in values_by_hand.items():

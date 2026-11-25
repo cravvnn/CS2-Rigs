@@ -196,6 +196,15 @@ def held_weapon_root(armature: bpy.types.Object) -> bpy.types.Object | None:
     )
 
 
+def instance_id(armature: bpy.types.Object) -> str:
+    """The agent's id, made unique first: Shift+D copies it to the duplicate."""
+    value = armature.get(INSTANCE_PROP, "")
+    if not value or any(obj is not armature and obj.get(INSTANCE_PROP) == value for obj in bpy.data.objects):
+        value = uuid.uuid4().hex
+        armature[INSTANCE_PROP] = value
+    return value
+
+
 def find_instance(instance: str) -> bpy.types.Object | None:
     """An imported object by the id stamped on it, whatever it has been renamed to."""
     return next((obj for obj in bpy.data.objects if obj.get(INSTANCE_PROP) == instance), None)
