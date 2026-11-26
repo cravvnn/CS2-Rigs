@@ -58,21 +58,25 @@ class OperatorProperties:
 class Layout:
     """Stands in for bpy.types.UILayout and records what the panel draws."""
 
-    def __init__(self, node=None, parent=None):
+    def __init__(self, node=None, parent=None, *, all_closed=False):
         self.node = node or Node("root")
         if parent is None:
             self.alert = False
             self.enabled = True
             self.scale_y = 1.0
+            self.alignment = "EXPAND"
             self.use_property_split = False
             self.use_property_decorate = True
+            self._all_closed = all_closed
         else:
             parent.node.children.append(self.node)
             self.alert = parent.alert
             self.enabled = parent.enabled
             self.scale_y = parent.scale_y
+            self.alignment = parent.alignment
             self.use_property_split = parent.use_property_split
             self.use_property_decorate = parent.use_property_decorate
+            self._all_closed = parent._all_closed
 
     def _child(self, kind, **values):
         return Layout(Node(kind, **values), self)
@@ -93,6 +97,12 @@ class Layout:
 
     def split(self, **_):
         return self._child("split")
+
+    def panel(self, idname, default_closed=False):
+        section = self._child("panel", idname=idname, default_closed=default_closed, closed=self._all_closed)
+        header = section._child("panel_header")
+        body = None if self._all_closed else section._child("panel_body")
+        return header, body
 
     def label(self, text="", icon="NONE"):
         assert icon in ICONS, f"unknown icon '{icon}'"
@@ -186,7 +196,7 @@ def panel_classes():
     ]
 
 
-def draw_panels(context):
+def draw_panels(context, *, all_closed=False):
     """Draw every panel class that its poll lets show, headers included."""
     drawn = []
     for cls in panel_classes():
@@ -194,11 +204,11 @@ def draw_panels(context):
         entry = {"class": cls.__name__, "idname": cls.bl_idname, "label": cls.bl_label, "visible": visible}
         if visible:
             panel = Panel()
-            header = Layout()
+            header = Layout(all_closed=all_closed)
             panel.layout = header
             if "draw_header" in cls.__dict__:
                 cls.draw_header(panel, context)
-            body = Layout()
+            body = Layout(all_closed=all_closed)
             panel.layout = body
             cls.draw(panel, context)
             entry["header"] = header.node.as_json()["children"]
@@ -210,15 +220,36 @@ def draw_panels(context):
 STATES = []
 
 
-def draw(label, context):
-    panels = draw_panels(context)
+def _node_texts(nodes):
+    out = []
+    for node in nodes:
+        if node.get("kind") in ("label", "operator", "prop", "prop_search"):
+            text = node.get("text") or node.get("label")
+            if text:
+                out.append(text)
+        if node.get("children"):
+            out.extend(_node_texts(node["children"]))
+    return out
+
+
+def draw(label, context, *, all_closed=False):
+    panels = draw_panels(context, all_closed=all_closed)
     states = [panel for panel in panels if panel["visible"]]
     texts = []
     names = []
     operators = []
+    sections = {}
 
     def collect(nodes):
         for node in nodes:
+            if node.get("kind") == "panel":
+                hdr = next((c for c in node["children"] if c["kind"] == "panel_header"), None)
+                sections[node["idname"]] = {
+                    "idname": node["idname"],
+                    "default_closed": node["default_closed"],
+                    "closed": node["closed"],
+                    "header_texts": _node_texts(hdr["children"]) if hdr else [],
+                }
             if node.get("kind") in ("label", "operator", "prop", "prop_search"):
                 text = node.get("text") or node.get("label")
                 if text:
@@ -233,9 +264,16 @@ def draw(label, context):
     for panel in states:
         collect(panel.get("header", []))
         collect(panel.get("body", []))
-    entries = {"state": label, "panels": panels, "texts": texts, "names": names, "operators": operators}
+    entries = {
+        "state": label,
+        "panels": panels,
+        "sections": sections,
+        "texts": texts,
+        "names": names,
+        "operators": operators,
+    }
     STATES.append(entries)
-    print(f"PANEL {label}: {len(states)} panels, {len(texts)} items")
+    print(f"PANEL {label}: {len(sections)} sections, {len(texts)} items")
     return entries
 
 
@@ -243,8 +281,8 @@ def find(state, idname):
     return next(panel for panel in state["panels"] if panel["idname"] == idname)
 
 
-def visible_names(state):
-    return [panel["label"] for panel in state["panels"] if panel["visible"]]
+def visible_sections(state):
+    return [sec["header_texts"][0] for sec in state["sections"].values() if sec["header_texts"]]
 
 
 def draw_full(context):
@@ -254,7 +292,7 @@ def draw_full(context):
     agent_only = draw("agent, no weapon yet", context)
     assert "Next: choose a weapon and press Hold Weapon." in agent_only["texts"]
     assert "cs2rig.build_rig" in agent_only["operators"]
-    assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} <= set(visible_names(agent_only))
+    assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} <= set(visible_sections(agent_only))
     wm.cs2rig_weapon = "ak47"
     assert bpy.ops.cs2rig.attach_weapon() == {"FINISHED"}
     wm.cs2rig_skin = "gs_ak47_bloodsport"
@@ -296,12 +334,9 @@ context = bpy.context
 wm = context.window_manager
 
 PANELS = panel_classes()
-assert len(PANELS) == 8, [cls.bl_idname for cls in PANELS]
+assert len(PANELS) == 1, [cls.bl_idname for cls in PANELS]
 assert PANELS[0].bl_idname == "CS2RIG_PT_main", PANELS[0].bl_idname
-for cls in PANELS[1:]:
-    assert cls.bl_parent_id == "CS2RIG_PT_main", (cls.bl_idname, cls.bl_parent_id)
-for cls in PANELS:
-    assert cls.bl_space_type == "VIEW_3D" and cls.bl_region_type == "UI", cls.bl_idname
+assert PANELS[0].bl_space_type == "VIEW_3D" and PANELS[0].bl_region_type == "UI"
 
 LABELS = {
     cs2_rigs.CS2RIG_OT_refresh: "Read Game Files",
@@ -344,19 +379,30 @@ updater.release = update.Release("9.9.9-alpha", "", "", "CS2_Rigs_9.9.9-alpha_Wi
 updater.status = "current"
 
 empty = draw("empty, before reading the game files", context)
-assert visible_names(empty) == ["CS2 Rigs"], visible_names(empty)
+assert visible_sections(empty) == [], visible_sections(empty)
 assert "Read Game Files" in empty["texts"]
 assert "Next: read the game files, then import an agent." in empty["texts"]
 
 assert bpy.ops.cs2rig.refresh() == {"FINISHED"}
 no_agent = draw("after reading, no agent", context)
-assert "Agent" in visible_names(no_agent) and "Weapon" not in visible_names(no_agent), visible_names(no_agent)
-assert {"Agent", "Map", "Tools"} <= set(visible_names(no_agent)), visible_names(no_agent)
+assert "Agent" in visible_sections(no_agent) and "Weapon" not in visible_sections(no_agent), visible_sections(no_agent)
+assert {"Agent", "Map", "Tools"} <= set(visible_sections(no_agent)), visible_sections(no_agent)
 assert "Next: choose an agent and press Import Agent." in no_agent["texts"]
 
 draw_full(context)
 full = draw("agent, weapon, finish, gloves, controls and map", context)
-assert {"CS2 Rigs", "Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} == set(visible_names(full)), visible_names(full)
+assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} == set(visible_sections(full)), visible_sections(full)
+# Open headers show only the section title (no summary clutter).
+for sec_id, expected_title in (
+    ("cs2rig_agent", "Agent"),
+    ("cs2rig_weapon", "Weapon"),
+    ("cs2rig_gloves", "Gloves"),
+    ("cs2rig_animation", "Animation"),
+    ("cs2rig_pose", "Pose Controls"),
+    ("cs2rig_map", "Map"),
+    ("cs2rig_tools", "Tools"),
+):
+    assert full["sections"][sec_id]["header_texts"] == [expected_title], full["sections"][sec_id]
 for expected in (
     "cs2rig_skin",
     "cs2rig_wear",
@@ -388,19 +434,23 @@ for expected in (
     "Weapon Seed",
     "Glove Wear",
     "Glove Seed",
-    "de_dust2_vanity",
+    "de_dust2_vanity · linked",
     "Applied: Bloodsport · wear 0.15 · seed 42",
     "Wearing: Driver Gloves | Crimson Weave · wear 0.15 · seed 44",
     "Only clips for AK-47",
     "Clip thumbnails: 1,795 of 1,795",
 ):
     assert expected in full["texts"], f"the panel did not draw {expected}"
-assert find(full, "CS2RIG_PT_agent")["header"][0]["text"] == "Cmdr. Davida 'Goggles' Fernandez (CT)"
-assert find(full, "CS2RIG_PT_weapon")["header"][0]["text"] == "AK-47 · Bloodsport"
-assert find(full, "CS2RIG_PT_gloves")["header"][0]["text"] == "Driver Gloves | Crimson Weave"
-assert find(full, "CS2RIG_PT_animation")["header"][0]["text"] == "world/rifle/_default_rifle/run_n_rifle"
-assert find(full, "CS2RIG_PT_pose")["header"][0]["text"] == "on"
-assert find(full, "CS2RIG_PT_map")["header"][0]["text"] == "de_dust2_vanity"
+
+# Collapsed headers show the section title on the left and the dimmed summary on the right.
+closed = draw("all sections closed", context, all_closed=True)
+assert closed["sections"]["cs2rig_agent"]["header_texts"] == ["Agent", "Cmdr. Davida 'Goggles' Fernandez (CT)"]
+assert closed["sections"]["cs2rig_weapon"]["header_texts"] == ["Weapon", "AK-47 · Bloodsport"]
+assert closed["sections"]["cs2rig_gloves"]["header_texts"] == ["Gloves", "Driver Gloves | Crimson Weave"]
+assert closed["sections"]["cs2rig_animation"]["header_texts"] == ["Animation", "run_n_rifle"]
+assert closed["sections"]["cs2rig_pose"]["header_texts"] == ["Pose Controls", "On"]
+assert closed["sections"]["cs2rig_map"]["header_texts"] == ["Map", "de_dust2_vanity"]
+assert closed["sections"]["cs2rig_tools"]["header_texts"] == ["Tools"]
 
 # A map whose built file came from older game files gets a Rebuild button.
 real_newer = cs2_rigs.maps.newer_build_possible

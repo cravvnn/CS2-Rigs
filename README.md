@@ -1,6 +1,6 @@
 <div align="center">
 
-<img src="docs/hero.jpg" alt="SAS agent reloading an AK-47 | Case Hardened on Ancient, rendered in Cycles">
+<img src="docs/hero.gif" alt="CS2 Rigs in Blender: SAS agent with an AK-47 | Case Hardened and Driver Gloves | Black Tie on Mirage, with the CS2 Rigs panel and Clip Browser">
 
 # CS2 Rigs
 

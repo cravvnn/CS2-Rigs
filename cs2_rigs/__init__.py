@@ -1330,12 +1330,12 @@ def _next_hint(context, armature: bpy.types.Object | None) -> str:
     if not rig.has_rig(armature):
         return "Next: add pose controls, or add a map."
     if maps.maps_in_scene(context.scene):
-        return "Next: press Browse Clips for another clip."
-    return "Next: add a map, or press Browse Clips for another clip."
+        return "Next: browse clips or adjust pose."
+    return "Next: add a map or browse clips."
 
 
 def _wear_text(wear: float) -> str:
-    return f"{wear:g}"
+    return f"{wear:.2f}".rstrip("0").rstrip(".") or "0"
 
 
 def _applied_line(armature: bpy.types.Object) -> str:
@@ -1359,7 +1359,7 @@ def _wearing_line(armature: bpy.types.Object) -> str:
 def _weapon_header(armature: bpy.types.Object) -> str:
     weapon = _held_weapon(armature)
     if weapon is None:
-        return "no weapon"
+        return "None"
     settings = paint.worn_skin_settings(armature)
     kit = _kits.get(settings[0]) if settings is not None else None
     return f"{_weapon_title(weapon)} · {kit.label}" if kit is not None else _weapon_title(weapon)
@@ -1368,7 +1368,7 @@ def _weapon_header(armature: bpy.types.Object) -> str:
 def _gloves_header(armature: bpy.types.Object) -> str:
     settings = gloves.worn_glove_settings(armature)
     if settings is None:
-        return "none"
+        return "None"
     kit = _kits.get(settings[0])
     return gloves_mod.label(kit) if kit is not None else settings[0]
 
@@ -1376,9 +1376,10 @@ def _gloves_header(armature: bpy.types.Object) -> str:
 def _clip_header(armature: bpy.types.Object) -> str:
     action = armature.animation_data.action if armature.animation_data else None
     if action is None:
-        return "no clip"
+        return "None"
     clip = action.get(importer.CLIP_KEY_PROP)
-    return catalog_mod.clip_label(clip) if clip else action.name
+    label = catalog_mod.clip_label(clip) if clip else action.name
+    return label.rsplit("/", 1)[-1]
 
 
 def _map_header(context: bpy.types.Context) -> str:
@@ -1386,7 +1387,7 @@ def _map_header(context: bpy.types.Context) -> str:
     missing = len(maps.missing_maps())
     if missing:
         names.append(f"{missing} missing")
-    return ", ".join(names) if names else "none"
+    return ", ".join(names) if names else "None"
 
 
 def _newer_build(game_map: catalog_mod.GameMap) -> bool:
@@ -1421,21 +1422,178 @@ def _thumbnail_count() -> tuple[int, int] | None:
     return made, total
 
 
-class _CS2RIGPanel(bpy.types.Panel):
-    bl_space_type = "VIEW_3D"
-    bl_region_type = "UI"
-    bl_category = "CS2 Rigs"
-    bl_parent_id = "CS2RIG_PT_main"
+def _section(layout, idname: str, title: str, summary: str = "", *, default_closed: bool = False):
+    """Collapsible section: title stays left-aligned; dimmed summary appears on the right only when collapsed."""
+    header, body = layout.panel(idname, default_closed=default_closed)
+    header.use_property_split = False
+    if body is None and summary:
+        row = header.row()
+        left = row.row()
+        left.alignment = "LEFT"
+        left.label(text=title)
+        right = row.row()
+        right.alignment = "RIGHT"
+        right.enabled = False
+        right.label(text=summary)
+    else:
+        header.label(text=title)
+    return body
 
-    @classmethod
-    def poll(cls, context):
-        return bool(_agent_items)
+
+def _draw_agent(layout, context, armature: bpy.types.Object | None) -> None:
+    body = _section(layout, "cs2rig_agent", "Agent", _agent_title(armature) if armature is not None else "None")
+    if body is None:
+        return
+    body.use_property_split = True
+    body.prop(context.window_manager, "cs2rig_agent")
+    body.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
+    if not _agent_items:
+        body.label(text="Read the game files first.", icon="INFO")
+    elif armature is None:
+        body.label(text="Select an imported agent.", icon="INFO")
 
 
-class _AgentPanel(_CS2RIGPanel):
-    @classmethod
-    def poll(cls, context):
-        return bool(_agent_items) and _agent(context) is not None
+def _draw_weapon(layout, context, armature: bpy.types.Object) -> None:
+    body = _section(layout, "cs2rig_weapon", "Weapon", _weapon_header(armature))
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_weapon")
+    row = body.row(align=True)
+    row.operator("cs2rig.attach_weapon", icon="ADD")
+    row.operator("cs2rig.remove_weapon", text="", icon="X")
+    if not importer.held_weapon_key(armature):
+        body.label(text="No weapon held.", icon="INFO")
+        return
+    body.prop(wm, "cs2rig_skin")
+    body.prop(wm, "cs2rig_wear", slider=True)
+    body.prop(wm, "cs2rig_seed")
+    row = body.row(align=True)
+    if _finish_job is not None and not _finish_job.cancelled:
+        row.label(text=f"{_finish_job.stage}...", icon="TIME")
+        row.operator("cs2rig.cancel_finish", text="Cancel", icon="X")
+    else:
+        row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
+        row.operator("cs2rig.remove_skin", text="", icon="X")
+    applied = _applied_line(armature)
+    if applied:
+        body.label(text=applied, icon="CHECKMARK")
+
+
+def _draw_gloves(layout, context, armature: bpy.types.Object) -> None:
+    body = _section(layout, "cs2rig_gloves", "Gloves", _gloves_header(armature), default_closed=True)
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_glove")
+    body.prop(wm, "cs2rig_glove_wear", slider=True)
+    body.prop(wm, "cs2rig_glove_seed")
+    row = body.row(align=True)
+    if _glove_job is not None and not _glove_job.cancelled:
+        row.label(text=f"{_glove_job.stage}...", icon="TIME")
+        row.operator("cs2rig.cancel_gloves", text="Cancel", icon="X")
+    else:
+        row.operator("cs2rig.apply_gloves", icon="MOD_CLOTH")
+        row.operator("cs2rig.remove_gloves", text="", icon="X")
+    wearing = _wearing_line(armature)
+    if wearing:
+        body.label(text=wearing, icon="CHECKMARK")
+
+
+def _draw_animation(layout, context, armature: bpy.types.Object) -> None:
+    body = _section(layout, "cs2rig_animation", "Animation", _clip_header(armature))
+    if body is None:
+        return
+    wm = context.window_manager
+    weapon = _held_weapon(armature)
+    body.prop(wm, "cs2rig_match_clips", text=f"Only clips for {_weapon_title(weapon)}")
+    body.prop_search(wm, "cs2rig_clip", wm, "cs2rig_clips", text="Clip", icon="ACTION")
+    row = body.row(align=True)
+    row.operator("cs2rig.load_clip", icon="PLAY")
+    row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
+
+
+def _draw_pose(layout, context, armature: bpy.types.Object) -> None:
+    added = rig.has_rig(armature)
+    body = _section(layout, "cs2rig_pose", "Pose Controls", "On" if added else "Off", default_closed=True)
+    if body is None:
+        return
+    if not added:
+        body.operator("cs2rig.build_rig", icon="CON_KINEMATIC")
+        return
+    if context.mode != "POSE":
+        body.operator("cs2rig.pose_mode", icon="ARMATURE_DATA")
+        body.label(text="Pose Mode shows the controls.", icon="INFO")
+    for limb, side in rig.rigged_limbs(armature):
+        switch = rig.switch_prop(limb, side)
+        active = armature.get(switch, 0.0) >= 0.5
+        row = body.row(align=True)
+        row.prop(armature, f'["{switch}"]', text=f"{'Left' if side == 'L' else 'Right'} {limb.title()}", slider=True)
+        op = row.operator("cs2rig.snap_limb", text="IK", depress=active)
+        op.limb, op.side, op.to_ik = limb, side, True
+        op = row.operator("cs2rig.snap_limb", text="FK", depress=not active)
+        op.limb, op.side, op.to_ik = limb, side, False
+    for prop in rig.follows(armature):
+        on = armature[prop] >= 0.5
+        op = body.operator(
+            "cs2rig.set_follow",
+            text=rig.FOLLOWS[prop][2],
+            depress=on,
+            icon="CHECKBOX_HLT" if on else "CHECKBOX_DEHLT",
+        )
+        op.prop, op.on = prop, not on
+    body.operator("cs2rig.remove_rig", icon="X")
+
+
+def _draw_map(layout, context) -> None:
+    body = _section(layout, "cs2rig_map", "Map", _map_header(context), default_closed=True)
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_map")
+    body.prop(wm, "cs2rig_map_link")
+    job = _building()
+    if job is not None:
+        row = body.row(align=True)
+        row.label(text=f"Building {job.game_map.name}  {job.elapsed}", icon="TIME")
+        row.operator("cs2rig.cancel_map_build", text="Cancel", icon="X")
+    else:
+        body.operator("cs2rig.add_map", icon="WORLD")
+    for name, collection in maps.maps_in_scene(context.scene).items():
+        row = body.row(align=True)
+        kind = "linked" if collection.library is not None else "copied"
+        row.label(text=f"{name} · {kind}", icon="OUTLINER_COLLECTION")
+        row.operator("cs2rig.remove_map", text="", icon="X").name = name
+        game_map = _maps.get(name)
+        if game_map is not None and _newer_build(game_map):
+            op = body.operator("cs2rig.add_map", text=f"Rebuild {name}", icon="FILE_REFRESH")
+            op.name, op.rebuild = name, True
+    for name in maps.missing_maps():
+        row = body.row(align=True)
+        row.alert = True
+        row.label(text=f"{name}: file missing", icon="ERROR")
+        row.operator("cs2rig.remove_map", text="", icon="X").name = name
+
+
+def _draw_tools(layout, context) -> None:
+    body = _section(layout, "cs2rig_tools", "Tools", default_closed=True)
+    if body is None:
+        return
+    count = _thumbnail_count()
+    if count is not None:
+        made, total = count
+        body.label(text=f"Clip thumbnails: {made:,} of {total:,}", icon="IMAGE_DATA")
+    if _preview_job is not None and _preview_job.running:
+        row = body.row(align=True)
+        row.label(text=_preview_job.progress, icon="TIME")
+        row.operator("cs2rig.cancel_clip_previews", text="Cancel", icon="X")
+    else:
+        body.operator("cs2rig.build_clip_previews", icon="IMAGE_DATA")
+    body.operator("cs2rig.fix_eyes", icon="MATERIAL")
+    body.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
 
 
 class CS2RIG_PT_main(bpy.types.Panel):
@@ -1476,216 +1634,16 @@ class CS2RIG_PT_main(bpy.types.Panel):
             col.alert = True
             col.label(text=wm.cs2rig_error, icon="ERROR")
             layout.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
-
-
-class CS2RIG_PT_agent(_CS2RIGPanel):
-    bl_idname = "CS2RIG_PT_agent"
-    bl_label = "Agent"
-    bl_order = 10
-
-    def draw_header(self, context):
-        armature = _agent(context)
-        self.layout.label(text=_agent_title(armature) if armature is not None else "none")
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        layout.prop(context.window_manager, "cs2rig_agent")
-        layout.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
         if not _agent_items:
-            layout.label(text="Read the game files first.", icon="INFO")
-        elif _agent(context) is None:
-            layout.label(text="Select an imported agent.", icon="INFO")
-
-
-class CS2RIG_PT_weapon(_AgentPanel):
-    bl_idname = "CS2RIG_PT_weapon"
-    bl_label = "Weapon"
-    bl_order = 20
-
-    def draw_header(self, context):
-        armature = _agent(context)
-        self.layout.label(text=_weapon_header(armature) if armature is not None else "none")
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        wm = context.window_manager
-        layout.prop(wm, "cs2rig_weapon")
-        row = layout.row(align=True)
-        row.operator("cs2rig.attach_weapon", icon="ADD")
-        row.operator("cs2rig.remove_weapon", text="", icon="X")
-        armature = _agent(context)
-        if armature is None or not importer.held_weapon_key(armature):
-            layout.label(text="No weapon held.", icon="INFO")
             return
-        layout.prop(wm, "cs2rig_skin")
-        layout.prop(wm, "cs2rig_wear", slider=True)
-        layout.prop(wm, "cs2rig_seed")
-        row = layout.row(align=True)
-        if _finish_job is not None and not _finish_job.cancelled:
-            row.label(text=f"{_finish_job.stage}...", icon="TIME")
-            row.operator("cs2rig.cancel_finish", text="Cancel", icon="X")
-        else:
-            row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
-            row.operator("cs2rig.remove_skin", text="", icon="X")
-        applied = _applied_line(armature)
-        if applied:
-            layout.label(text=applied, icon="CHECKMARK")
-
-
-class CS2RIG_PT_gloves(_AgentPanel):
-    bl_idname = "CS2RIG_PT_gloves"
-    bl_label = "Gloves"
-    bl_order = 30
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw_header(self, context):
-        armature = _agent(context)
-        self.layout.label(text=_gloves_header(armature) if armature is not None else "none")
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        wm = context.window_manager
-        layout.prop(wm, "cs2rig_glove")
-        layout.prop(wm, "cs2rig_glove_wear", slider=True)
-        layout.prop(wm, "cs2rig_glove_seed")
-        row = layout.row(align=True)
-        if _glove_job is not None and not _glove_job.cancelled:
-            row.label(text=f"{_glove_job.stage}...", icon="TIME")
-            row.operator("cs2rig.cancel_gloves", text="Cancel", icon="X")
-        else:
-            row.operator("cs2rig.apply_gloves", icon="MOD_CLOTH")
-            row.operator("cs2rig.remove_gloves", text="", icon="X")
-        armature = _agent(context)
-        wearing = _wearing_line(armature) if armature is not None else ""
-        if wearing:
-            layout.label(text=wearing, icon="CHECKMARK")
-
-
-class CS2RIG_PT_animation(_AgentPanel):
-    bl_idname = "CS2RIG_PT_animation"
-    bl_label = "Animation"
-    bl_order = 40
-
-    def draw_header(self, context):
-        armature = _agent(context)
-        self.layout.label(text=_clip_header(armature) if armature is not None else "none")
-
-    def draw(self, context):
-        layout = self.layout
-        wm = context.window_manager
-        armature = _agent(context)
-        weapon = _held_weapon(armature) if armature is not None else None
-        layout.prop(wm, "cs2rig_match_clips", text=f"Only clips for {_weapon_title(weapon)}")
-        layout.prop_search(wm, "cs2rig_clip", wm, "cs2rig_clips", text="Clip", icon="ACTION")
-        row = layout.row(align=True)
-        row.operator("cs2rig.load_clip", icon="PLAY")
-        row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
-
-
-class CS2RIG_PT_pose(_AgentPanel):
-    bl_idname = "CS2RIG_PT_pose"
-    bl_label = "Pose Controls"
-    bl_order = 50
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw_header(self, context):
-        armature = _agent(context)
-        added = armature is not None and rig.has_rig(armature)
-        self.layout.label(text="on" if added else "off")
-
-    def draw(self, context):
-        layout = self.layout
-        armature = _agent(context)
-        if armature is None:
-            return
-        if not rig.has_rig(armature):
-            layout.operator("cs2rig.build_rig", icon="CON_KINEMATIC")
-            return
-        if context.mode != "POSE":
-            layout.operator("cs2rig.pose_mode", icon="ARMATURE_DATA")
-            layout.label(text="Pose Mode shows the controls.", icon="INFO")
-        for limb, side in rig.rigged_limbs(armature):
-            switch = rig.switch_prop(limb, side)
-            active = armature.get(switch, 0.0) >= 0.5
-            row = layout.row(align=True)
-            row.prop(armature, f'["{switch}"]', text=f"{'Left' if side == 'L' else 'Right'} {limb.title()}", slider=True)
-            op = row.operator("cs2rig.snap_limb", text="IK", depress=active)
-            op.limb, op.side, op.to_ik = limb, side, True
-            op = row.operator("cs2rig.snap_limb", text="FK", depress=not active)
-            op.limb, op.side, op.to_ik = limb, side, False
-        for prop in rig.follows(armature):
-            on = armature[prop] >= 0.5
-            op = layout.operator(
-                "cs2rig.set_follow",
-                text=rig.FOLLOWS[prop][2],
-                depress=on,
-                icon="CHECKBOX_HLT" if on else "CHECKBOX_DEHLT",
-            )
-            op.prop, op.on = prop, not on
-        layout.operator("cs2rig.remove_rig", icon="X")
-
-
-class CS2RIG_PT_map(_CS2RIGPanel):
-    bl_idname = "CS2RIG_PT_map"
-    bl_label = "Map"
-    bl_order = 60
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw_header(self, context):
-        self.layout.label(text=_map_header(context))
-
-    def draw(self, context):
-        layout = self.layout
-        layout.use_property_split = True
-        wm = context.window_manager
-        layout.prop(wm, "cs2rig_map")
-        layout.prop(wm, "cs2rig_map_link")
-        job = _building()
-        if job is not None:
-            row = layout.row(align=True)
-            row.label(text=f"Building {job.game_map.name}  {job.elapsed}", icon="TIME")
-            row.operator("cs2rig.cancel_map_build", text="Cancel", icon="X")
-        else:
-            layout.operator("cs2rig.add_map", icon="WORLD")
-        for name, collection in maps.maps_in_scene(context.scene).items():
-            row = layout.row(align=True)
-            kind = "linked" if collection.library is not None else "copied"
-            row.label(text=f"{name} · {kind}", icon="OUTLINER_COLLECTION")
-            row.operator("cs2rig.remove_map", text="", icon="X").name = name
-            game_map = _maps.get(name)
-            if game_map is not None and _newer_build(game_map):
-                op = layout.operator("cs2rig.add_map", text=f"Rebuild {name}", icon="FILE_REFRESH")
-                op.name, op.rebuild = name, True
-        for name in maps.missing_maps():
-            row = layout.row(align=True)
-            row.alert = True
-            row.label(text=f"{name}: file missing", icon="ERROR")
-            row.operator("cs2rig.remove_map", text="", icon="X").name = name
-
-
-class CS2RIG_PT_tools(_CS2RIGPanel):
-    bl_idname = "CS2RIG_PT_tools"
-    bl_label = "Tools"
-    bl_order = 70
-    bl_options = {"DEFAULT_CLOSED"}
-
-    def draw(self, context):
-        layout = self.layout
-        count = _thumbnail_count()
-        if count is not None:
-            made, total = count
-            layout.label(text=f"Clip thumbnails: {made:,} of {total:,}", icon="IMAGE_DATA")
-        if _preview_job is not None and _preview_job.running:
-            row = layout.row(align=True)
-            row.label(text=_preview_job.progress, icon="TIME")
-            row.operator("cs2rig.cancel_clip_previews", text="Cancel", icon="X")
-        else:
-            layout.operator("cs2rig.build_clip_previews", icon="IMAGE_DATA")
-        layout.operator("cs2rig.fix_eyes", icon="MATERIAL")
-        layout.operator("cs2rig.open_log_folder", icon="FILE_FOLDER")
+        _draw_agent(layout, context, armature)
+        if armature is not None:
+            _draw_weapon(layout, context, armature)
+            _draw_gloves(layout, context, armature)
+            _draw_animation(layout, context, armature)
+            _draw_pose(layout, context, armature)
+        _draw_map(layout, context)
+        _draw_tools(layout, context)
 
 
 _classes = (
@@ -1720,13 +1678,6 @@ _classes = (
     CS2RIG_OT_add_map,
     CS2RIG_OT_remove_map,
     CS2RIG_PT_main,
-    CS2RIG_PT_agent,
-    CS2RIG_PT_weapon,
-    CS2RIG_PT_gloves,
-    CS2RIG_PT_animation,
-    CS2RIG_PT_pose,
-    CS2RIG_PT_map,
-    CS2RIG_PT_tools,
 )
 
 
