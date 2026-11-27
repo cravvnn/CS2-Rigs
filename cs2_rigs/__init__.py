@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, updater
+from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, studio, updater
 from .core import cache as cache_mod
 from .core import clipdata as clipdata_mod
 from .core import log as log_mod
@@ -21,7 +21,9 @@ from .core import catalog as catalog_mod
 from .core import gloves as gloves_mod
 from .core import proc
 from .core import skins as skins_mod
+from .core import studio as studio_core
 from .core.download import CLI_VERSION
+from .map_build import MAP_NAME_PROP
 
 # Filled by Read Game Files. Blender's enum callbacks need the item lists kept alive here.
 _agent_items: list[tuple[str, str, str]] = []
@@ -41,6 +43,19 @@ _preview_job: clip_previews.PreviewJob | None = None
 _glove_job: gloves.GloveJob | None = None
 _finish_job: paint.FinishJob | None = None
 _exit_hooked = False
+_syncing_studio = False
+_studio_preset_items: list[tuple[str, str, str]] = [
+    (studio_core.PRESETS[key].key, studio_core.PRESETS[key].label, studio_core.PRESETS[key].description)
+    for key in studio_core.PRESET_ORDER
+]
+
+
+def _on_studio_setting_changed(self, context) -> None:
+    """Update the studio lighting and backdrop live when the user tweaks a Studio setting."""
+    if _syncing_studio or context is None or context.scene is None:
+        return
+    if studio.has_studio(context.scene):
+        studio.apply_studio_look(context, self.cs2rig_studio_preset, self.cs2rig_studio_backdrop)
 
 
 def _cancel_jobs() -> None:
@@ -146,10 +161,14 @@ def _held_weapon(armature: bpy.types.Object | None) -> catalog_mod.Weapon | None
     return _weapons.get(importer.held_weapon_key(armature)) if armature else None
 
 
+def _active_weapon(target: bpy.types.Object | None) -> catalog_mod.Weapon | None:
+    return _weapons.get(importer.weapon_key(target)) if target is not None else None
+
+
 def _skin_enum(self, context):
-    """Finishes for the weapon the agent holds."""
-    armature = importer.find_agent_armature(context)
-    key = importer.held_weapon_key(armature) if armature else ""
+    """Finishes for the active weapon (held by an agent or standalone)."""
+    target = importer.find_weapon_target(context)
+    key = importer.weapon_key(target) if target is not None else ""
     if key not in _skin_items:
         offered = skins_mod.kits_for(list(_kits.values()), skins_mod.item_name(key))
         _skin_items[key] = [
@@ -238,6 +257,13 @@ def _weapon_title(weapon: catalog_mod.Weapon | None) -> str:
     return weapon.name or weapon.label
 
 
+def _standalone_title(root: bpy.types.Object) -> str:
+    weapon = _active_weapon(root)
+    if weapon is not None:
+        return weapon.name or weapon.label
+    return root.name.removesuffix(".weapon")
+
+
 def _choose(wm, name: str, value, items) -> None:
     """Point a dropdown at `value` when it is one of its items."""
     if value and value in {item[0] for item in items}:
@@ -245,26 +271,35 @@ def _choose(wm, name: str, value, items) -> None:
 
 
 def _sync_to_scene(context: bpy.types.Context) -> None:
-    """Point the panel at what the scene's agent has on: its agent, weapon, finish, gloves and clip."""
-    armature = importer.find_agent_armature(context)
-    if armature is None:
-        return
+    """Point the panel at what the scene has: studio settings, agent, weapon, finish, gloves and clip."""
+    global _syncing_studio
     wm = context.window_manager
-    _choose(wm, "cs2rig_agent", armature.get(importer.AGENT_KEY_PROP), _agent_items)
-    _choose(wm, "cs2rig_weapon", importer.held_weapon_key(armature), _weapon_items)
-    _fill_clips(context)  # the clips depend on the held weapon
-    skin = paint.worn_skin_settings(armature)
-    if skin is not None:
-        _choose(wm, "cs2rig_skin", skin[0], _skin_enum(None, context))
-        wm.cs2rig_wear, wm.cs2rig_seed = skin[1], skin[2]
-    glove = gloves.worn_glove_settings(armature)
-    if glove is not None:
-        _choose(wm, "cs2rig_glove", glove[0], _glove_items)
-        wm.cs2rig_glove_wear, wm.cs2rig_glove_seed = glove[1], glove[2]
-    action = armature.animation_data.action if armature.animation_data else None
-    clip = action.get(importer.CLIP_KEY_PROP) if action is not None else None
-    if clip and catalog_mod.clip_label(clip) in wm.cs2rig_clips:
-        wm.cs2rig_clip = catalog_mod.clip_label(clip)
+    if studio.has_studio(context.scene):
+        _syncing_studio = True
+        try:
+            _choose(wm, "cs2rig_studio_preset", studio.studio_preset(context.scene), _studio_preset_items)
+            wm.cs2rig_studio_backdrop = studio.studio_backdrop_enabled(context.scene)
+        finally:
+            _syncing_studio = False
+    armature = importer.find_agent_armature(context)
+    if armature is not None:
+        _choose(wm, "cs2rig_agent", armature.get(importer.AGENT_KEY_PROP), _agent_items)
+        _fill_clips(context)  # the clips depend on the held weapon
+        glove = gloves.worn_glove_settings(armature)
+        if glove is not None:
+            _choose(wm, "cs2rig_glove", glove[0], _glove_items)
+            wm.cs2rig_glove_wear, wm.cs2rig_glove_seed = glove[1], glove[2]
+        action = armature.animation_data.action if armature.animation_data else None
+        clip = action.get(importer.CLIP_KEY_PROP) if action is not None else None
+        if clip and catalog_mod.clip_label(clip) in wm.cs2rig_clips:
+            wm.cs2rig_clip = catalog_mod.clip_label(clip)
+    target = importer.find_weapon_target(context)
+    if target is not None:
+        _choose(wm, "cs2rig_weapon", importer.weapon_key(target), _weapon_items)
+        skin = paint.worn_skin_settings(target)
+        if skin is not None:
+            _choose(wm, "cs2rig_skin", skin[0], _skin_enum(None, context))
+            wm.cs2rig_wear, wm.cs2rig_seed = skin[1], skin[2]
 
 
 @bpy.app.handlers.persistent
@@ -745,6 +780,30 @@ class CS2RIG_OT_cancel_finish(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CS2RIG_OT_import_weapon(bpy.types.Operator):
+    bl_idname = "cs2rig.import_weapon"
+    bl_label = "Import Weapon"
+    bl_description = "Convert the chosen weapon or knife from the game files and add it to the scene on its own"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not _weapons:
+            cls.poll_message_set(_NEEDS_REFRESH)
+            return False
+        return True
+
+    @_reports_errors
+    def execute(self, context):
+        weapon = _weapons.get(context.window_manager.cs2rig_weapon)
+        if weapon is None:
+            _report_error(self, context, "Choose a weapon first.")
+            return {"CANCELLED"}
+        importer.import_weapon(context, session.get(), weapon)
+        self.report({"INFO"}, f"Imported {_weapon_title(weapon)}.")
+        return {"FINISHED"}
+
+
 class CS2RIG_OT_attach_weapon(_AgentOperator):
     bl_idname = "cs2rig.attach_weapon"
     bl_label = "Hold Weapon"
@@ -771,30 +830,35 @@ class CS2RIG_OT_attach_weapon(_AgentOperator):
         return {"FINISHED"}
 
 
-class CS2RIG_OT_remove_weapon(_AgentOperator):
+class CS2RIG_OT_remove_weapon(bpy.types.Operator):
     bl_idname = "cs2rig.remove_weapon"
     bl_label = "Remove Weapon"
-    bl_description = "Remove the weapon the selected agent is holding"
+    bl_description = "Remove the held weapon from the selected agent, or delete the selected standalone weapon"
+    bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        armature = importer.find_agent_armature(context)
-        return armature is not None and bool(importer.held_weapon_key(armature))
+        target = importer.find_weapon_target(context)
+        return target is not None and bool(importer.weapon_key(target))
 
     @_reports_errors
     def execute(self, context):
-        importer.remove_weapon(importer.find_agent_armature(context))
-        _fill_clips(context)
+        target = importer.find_weapon_target(context)
+        was_agent = importer.is_agent(target)
+        importer.remove_weapon(target)
+        if was_agent:
+            _fill_clips(context)
         return {"FINISHED"}
 
 
-class CS2RIG_OT_apply_skin(_AgentOperator):
+class CS2RIG_OT_apply_skin(bpy.types.Operator):
     bl_idname = "cs2rig.apply_skin"
     bl_label = "Apply Finish"
     bl_description = (
-        "Put the chosen finish on the held weapon, with the Weapon Wear and Weapon Seed above. "
+        "Put the chosen finish on the weapon, with the Weapon Wear and Weapon Seed above. "
         "About 10 seconds the first time"
     )
+    bl_options = {"REGISTER", "UNDO"}
 
     _timer = None
 
@@ -803,12 +867,12 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         if not _kits:
             cls.poll_message_set(_NEEDS_REFRESH)
             return False
-        armature = importer.find_agent_armature(context)
+        target = importer.find_weapon_target(context)
         # A job cancelled by opening a file may still be finishing on its thread.
         chosen = context.window_manager.cs2rig_skin
         return (
-            armature is not None
-            and bool(importer.held_weapon_key(armature))
+            target is not None
+            and bool(importer.weapon_key(target))
             and chosen not in ("", "NONE")
             and (_finish_job is None or not _finish_job.busy)
         )
@@ -820,7 +884,7 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         if kit is None:
             _report_error(self, context, "Choose a finish first.")
             return None
-        _finish_job = paint.FinishJob(session.get(), importer.find_agent_armature(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
+        _finish_job = paint.FinishJob(session.get(), importer.find_weapon_target(context), kit, wm.cs2rig_wear, wm.cs2rig_seed)
         return _finish_job
 
     def _finish(self, context, job: paint.FinishJob) -> set[str]:
@@ -840,10 +904,10 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         return {"FINISHED"}
 
     def _step(self, context, job: paint.FinishJob) -> bool:
-        armature = bpy.data.objects.get(job.armature_name)
-        if armature is None:
-            return job.step(context)  # reports that the agent is gone
-        with importer.working_on(context, armature):
+        target = job.target()
+        if target is None:
+            return job.step(context)  # reports that the weapon is gone
+        with importer.working_on(context, target):
             return job.step(context)
 
     @_reports_errors
@@ -902,19 +966,20 @@ class CS2RIG_OT_apply_skin(_AgentOperator):
         return self._finish(context, job)
 
 
-class CS2RIG_OT_remove_skin(_AgentOperator):
+class CS2RIG_OT_remove_skin(bpy.types.Operator):
     bl_idname = "cs2rig.remove_skin"
     bl_label = "Remove Finish"
-    bl_description = "Give the held weapon its stock look back"
+    bl_description = "Give the weapon its stock look back"
+    bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
-        armature = importer.find_agent_armature(context)
-        return armature is not None and bool(paint.worn_skin(armature))
+        target = importer.find_weapon_target(context)
+        return target is not None and bool(paint.worn_skin(target))
 
     @_reports_errors
     def execute(self, context):
-        paint.remove_skin(importer.find_agent_armature(context))
+        paint.remove_skin(importer.find_weapon_target(context))
         return {"FINISHED"}
 
 
@@ -1213,10 +1278,22 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             self.report({"INFO"}, f"Rebuilt {game_map.name}.")
             return {"FINISHED"}
         link = context.window_manager.cs2rig_map_link
-        if maps.add_map(context, library, game_map.name, link) is None:
+        use_map = context.window_manager.cs2rig_map_sky
+        collection = maps.add_map(context, library, game_map.name, link)
+        if collection is None:
             self.report({"INFO"}, f"Linked {game_map.name} to its new file.")
             return {"FINISHED"}
-        sky = " A plain sky was added for light." if maps.add_sky(context.scene) else ""
+        maps.add_sky(context.scene, game_map.name, library, collection, link, use_map)
+        world = context.scene.world
+        real = world is not None and world.get(MAP_NAME_PROP) == game_map.name
+        if not use_map:
+            sky = " Map sky and lights left off."
+        elif real:
+            sky = " Real CS2 sky and map lights applied."
+        elif context.scene.world is not None:
+            sky = " Map lights applied; the scene already had a sky."
+        else:
+            sky = " A plain sky was added for light."
         self.report({"INFO"}, f"{'Linked' if link else 'Appended'} {game_map.name}.{sky}")
         return {"FINISHED"}
 
@@ -1294,6 +1371,95 @@ class CS2RIG_OT_remove_map(bpy.types.Operator):
         return {"FINISHED"}
 
 
+class CS2RIG_OT_apply_map_sky(bpy.types.Operator):
+    bl_idname = "cs2rig.apply_map_sky"
+    bl_label = "Apply Map Sky and Lights"
+    bl_description = "Put this map's real CS2 sky in the scene and show its lights again"
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty()
+
+    @_reports_errors
+    def execute(self, context):
+        collection = maps.maps_in_scene(context.scene).get(self.name)
+        if collection is None:
+            _report_error(self, context, f"{self.name} is not in this scene.")
+            return {"CANCELLED"}
+        library = maps.library_path(session.get(), _maps[self.name]) if self.name in _maps else None
+        if not maps.apply_map_sky(context.scene, self.name, library, collection):
+            _report_error(self, context, f"{self.name} was built without a sky. Rebuild it to get one.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, f"Applied {self.name}'s sky and lights.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_add_studio(bpy.types.Operator):
+    bl_idname = "cs2rig.add_studio"
+    bl_label = "Add Studio"
+    bl_description = "Add 3-point studio lights, a backdrop and a camera framed to the active agent or selection"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @_reports_errors
+    def execute(self, context):
+        wm = context.window_manager
+        preset = studio_core.get_preset(wm.cs2rig_studio_preset)
+        studio.add_or_update_studio(context, preset.key, wm.cs2rig_studio_backdrop)
+        self.report({"INFO"}, f"Studio ready ({preset.label}).")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_remove_studio(bpy.types.Operator):
+    bl_idname = "cs2rig.remove_studio"
+    bl_label = "Remove Studio"
+    bl_description = "Remove the studio lights, backdrop, camera and turntable without touching anything else"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return studio.has_studio(context.scene)
+
+    @_reports_errors
+    def execute(self, context):
+        studio.remove_studio(context)
+        self.report({"INFO"}, "Removed the studio.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_frame_studio(bpy.types.Operator):
+    bl_idname = "cs2rig.frame_studio"
+    bl_label = "Frame Subject"
+    bl_description = "Re-frame the studio camera, lights and backdrop around the active agent or selected object"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return studio.has_studio(context.scene)
+
+    @_reports_errors
+    def execute(self, context):
+        studio.frame_subject(context)
+        self.report({"INFO"}, "Framed the studio on the subject.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_toggle_turntable(bpy.types.Operator):
+    bl_idname = "cs2rig.toggle_turntable"
+    bl_label = "Turntable"
+    bl_description = "Orbit the studio camera and lights 360 degrees across the scene frame range without altering agent animation"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return studio.has_studio(context.scene)
+
+    @_reports_errors
+    def execute(self, context):
+        enable = not studio.has_turntable(context.scene)
+        studio.set_turntable(context, enable)
+        self.report({"INFO"}, "Added 360° turntable." if enable else "Removed turntable.")
+        return {"FINISHED"}
+
+
 def _draw_update(layout) -> None:
     """The top row: whether a newer CS2 Rigs is out. Updating is always the user's choice."""
     if updater.status == "available":
@@ -1316,12 +1482,22 @@ def _agent(context) -> bpy.types.Object | None:
     return importer.find_agent_armature(context)
 
 
-def _next_hint(context, armature: bpy.types.Object | None) -> str:
+def _weapon_target(context) -> bpy.types.Object | None:
+    return importer.find_weapon_target(context)
+
+
+def _next_hint(context, armature: bpy.types.Object | None, standalone: bpy.types.Object | None = None) -> str:
     """One line that says what to do next in the state the panel is in."""
     if not _agent_items:
-        return "Next: read the game files, then import an agent."
+        return "Next: read the game files, then import an agent or weapon."
+    if standalone is not None:
+        if not paint.worn_skin(standalone):
+            return "Next: choose a finish and press Apply Finish."
+        if maps.maps_in_scene(context.scene):
+            return "Next: adjust finish or import an agent."
+        return "Next: add a map or import another weapon."
     if armature is None:
-        return "Next: choose an agent and press Import Agent."
+        return "Next: import an agent or a weapon."
     if not importer.held_weapon_key(armature):
         return "Next: choose a weapon and press Hold Weapon."
     action = armature.animation_data.action if armature.animation_data else None
@@ -1338,8 +1514,8 @@ def _wear_text(wear: float) -> str:
     return f"{wear:.2f}".rstrip("0").rstrip(".") or "0"
 
 
-def _applied_line(armature: bpy.types.Object) -> str:
-    settings = paint.worn_skin_settings(armature)
+def _applied_line(target: bpy.types.Object) -> str:
+    settings = paint.worn_skin_settings(target)
     if settings is None:
         return ""
     kit = _kits.get(settings[0])
@@ -1356,11 +1532,11 @@ def _wearing_line(armature: bpy.types.Object) -> str:
     return f"Wearing: {label} · wear {_wear_text(settings[1])} · seed {settings[2]}"
 
 
-def _weapon_header(armature: bpy.types.Object) -> str:
-    weapon = _held_weapon(armature)
+def _weapon_header(target: bpy.types.Object | None) -> str:
+    weapon = _active_weapon(target)
     if weapon is None:
         return "None"
-    settings = paint.worn_skin_settings(armature)
+    settings = paint.worn_skin_settings(target)
     kit = _kits.get(settings[0]) if settings is not None else None
     return f"{_weapon_title(weapon)} · {kit.label}" if kit is not None else _weapon_title(weapon)
 
@@ -1388,6 +1564,13 @@ def _map_header(context: bpy.types.Context) -> str:
     if missing:
         names.append(f"{missing} missing")
     return ", ".join(names) if names else "None"
+
+
+def _studio_header(context: bpy.types.Context) -> str:
+    if not studio.has_studio(context.scene):
+        return "Off"
+    label = studio_core.get_preset(studio.studio_preset(context.scene)).label
+    return f"{label} · Turntable" if studio.has_turntable(context.scene) else label
 
 
 def _newer_build(game_map: catalog_mod.GameMap) -> bool:
@@ -1453,18 +1636,33 @@ def _draw_agent(layout, context, armature: bpy.types.Object | None) -> None:
         body.label(text="Select an imported agent.", icon="INFO")
 
 
-def _draw_weapon(layout, context, armature: bpy.types.Object) -> None:
-    body = _section(layout, "cs2rig_weapon", "Weapon", _weapon_header(armature))
+def _draw_weapon(
+    layout,
+    context,
+    target: bpy.types.Object | None,
+) -> None:
+    body = _section(layout, "cs2rig_weapon", "Weapon", _weapon_header(target))
     if body is None:
         return
     body.use_property_split = True
     wm = context.window_manager
     body.prop(wm, "cs2rig_weapon")
+    acting_on_agent = target is not None and importer.is_agent(target)
     row = body.row(align=True)
-    row.operator("cs2rig.attach_weapon", icon="ADD")
-    row.operator("cs2rig.remove_weapon", text="", icon="X")
-    if not importer.held_weapon_key(armature):
-        body.label(text="No weapon held.", icon="INFO")
+    if acting_on_agent:
+        row.operator("cs2rig.attach_weapon", icon="ADD")
+        row.operator("cs2rig.remove_weapon", text="", icon="X")
+        body.operator("cs2rig.import_weapon", text="Import Standalone", icon="IMPORT")
+    else:
+        row.operator("cs2rig.import_weapon", icon="IMPORT")
+        row.operator("cs2rig.remove_weapon", text="", icon="X")
+    if target is None or not importer.weapon_key(target):
+        if acting_on_agent:
+            body.label(text="No weapon held.", icon="INFO")
+        elif any(importer.is_standalone_weapon(obj) for obj in context.scene.objects):
+            body.label(text="Select an imported weapon.", icon="INFO")
+        else:
+            body.label(text="No weapon imported.", icon="INFO")
         return
     body.prop(wm, "cs2rig_skin")
     body.prop(wm, "cs2rig_wear", slider=True)
@@ -1476,7 +1674,7 @@ def _draw_weapon(layout, context, armature: bpy.types.Object) -> None:
     else:
         row.operator("cs2rig.apply_skin", icon="BRUSH_DATA")
         row.operator("cs2rig.remove_skin", text="", icon="X")
-    applied = _applied_line(armature)
+    applied = _applied_line(target)
     if applied:
         body.label(text=applied, icon="CHECKMARK")
 
@@ -1555,6 +1753,7 @@ def _draw_map(layout, context) -> None:
     wm = context.window_manager
     body.prop(wm, "cs2rig_map")
     body.prop(wm, "cs2rig_map_link")
+    body.prop(wm, "cs2rig_map_sky")
     job = _building()
     if job is not None:
         row = body.row(align=True)
@@ -1566,6 +1765,7 @@ def _draw_map(layout, context) -> None:
         row = body.row(align=True)
         kind = "linked" if collection.library is not None else "copied"
         row.label(text=f"{name} · {kind}", icon="OUTLINER_COLLECTION")
+        row.operator("cs2rig.apply_map_sky", text="", icon="LIGHT").name = name
         row.operator("cs2rig.remove_map", text="", icon="X").name = name
         game_map = _maps.get(name)
         if game_map is not None and _newer_build(game_map):
@@ -1576,6 +1776,29 @@ def _draw_map(layout, context) -> None:
         row.alert = True
         row.label(text=f"{name}: file missing", icon="ERROR")
         row.operator("cs2rig.remove_map", text="", icon="X").name = name
+
+
+def _draw_studio(layout, context) -> None:
+    body = _section(layout, "cs2rig_studio", "Studio", _studio_header(context), default_closed=True)
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_studio_preset")
+    body.prop(wm, "cs2rig_studio_backdrop")
+    if not studio.has_studio(context.scene):
+        body.operator("cs2rig.add_studio", icon="LIGHT_AREA")
+        return
+    turntable = studio.has_turntable(context.scene)
+    row = body.row(align=True)
+    row.operator("cs2rig.frame_studio", icon="CAMERA_DATA")
+    row.operator(
+        "cs2rig.toggle_turntable",
+        text="Turntable",
+        depress=turntable,
+        icon="CHECKBOX_HLT" if turntable else "CHECKBOX_DEHLT",
+    )
+    body.operator("cs2rig.remove_studio", icon="X")
 
 
 def _draw_tools(layout, context) -> None:
@@ -1626,9 +1849,13 @@ class CS2RIG_PT_main(bpy.types.Panel):
             col.operator("cs2rig.refresh", icon="FILE_REFRESH")
             layout.label(text="About 30 seconds the first time.", icon="TIME")
         armature = _agent(context)
-        if armature is not None:
+        weapon_target = _weapon_target(context)
+        standalone = weapon_target if weapon_target is not None and importer.is_standalone_weapon(weapon_target) else None
+        if standalone is not None:
+            layout.label(text=f"Acting on {_standalone_title(standalone)}", icon="OBJECT_DATA")
+        elif armature is not None:
             layout.label(text=f"Acting on {_agent_title(armature)}", icon="ARMATURE_DATA")
-        layout.label(text=_next_hint(context, armature), icon="INFO")
+        layout.label(text=_next_hint(context, armature, standalone), icon="INFO")
         if wm.cs2rig_error:
             col = layout.column()
             col.alert = True
@@ -1637,12 +1864,13 @@ class CS2RIG_PT_main(bpy.types.Panel):
         if not _agent_items:
             return
         _draw_agent(layout, context, armature)
+        _draw_weapon(layout, context, weapon_target)
         if armature is not None:
-            _draw_weapon(layout, context, armature)
             _draw_gloves(layout, context, armature)
             _draw_animation(layout, context, armature)
             _draw_pose(layout, context, armature)
         _draw_map(layout, context)
+        _draw_studio(layout, context)
         _draw_tools(layout, context)
 
 
@@ -1664,6 +1892,7 @@ _classes = (
     CS2RIG_OT_cancel_map_build,
     CS2RIG_OT_cancel_gloves,
     CS2RIG_OT_cancel_finish,
+    CS2RIG_OT_import_weapon,
     CS2RIG_OT_attach_weapon,
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
@@ -1677,6 +1906,11 @@ _classes = (
     CS2RIG_OT_set_follow,
     CS2RIG_OT_add_map,
     CS2RIG_OT_remove_map,
+    CS2RIG_OT_apply_map_sky,
+    CS2RIG_OT_add_studio,
+    CS2RIG_OT_remove_studio,
+    CS2RIG_OT_frame_studio,
+    CS2RIG_OT_toggle_turntable,
     CS2RIG_PT_main,
 )
 
@@ -1699,8 +1933,8 @@ def register():
     updater.start_check(_addon_version())
     wm = bpy.types.WindowManager
     wm.cs2rig_agent = EnumProperty(name="Agent", description="The agent to import. CT agents are listed first", items=lambda self, context: _agent_items or _PRESS_REFRESH)
-    wm.cs2rig_weapon = EnumProperty(name="Weapon", description="The weapon or knife to put in the selected agent's hands", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
-    wm.cs2rig_skin = EnumProperty(name="Finish", description="The finish for the held weapon. Only finishes made for this weapon are listed", items=_skin_enum)
+    wm.cs2rig_weapon = EnumProperty(name="Weapon", description="The weapon or knife to import, or put in the selected agent's hands", items=lambda self, context: _weapon_items or _PRESS_REFRESH)
+    wm.cs2rig_skin = EnumProperty(name="Finish", description="The finish for the selected or held weapon. Only finishes made for this weapon are listed", items=_skin_enum)
     wm.cs2rig_wear = FloatProperty(
         name="Weapon Wear",
         description="How worn the weapon finish is, from 0 (factory new) to 1 (battle-scarred). Kept inside the range the finish allows",
@@ -1736,6 +1970,11 @@ def register():
         description="Keep the map in its own file and link to it, so this file stays small. Turn off to copy the map into this file",
         default=True,
     )
+    wm.cs2rig_map_sky = BoolProperty(
+        name="Map Sky & Lights",
+        description="Use the map's real CS2 sky and its calibrated lights. Turn off for the plain fallback sky and no map lights",
+        default=True,
+    )
     wm.cs2rig_clips = CollectionProperty(type=CS2RIG_ClipName)
     wm.cs2rig_clip = StringProperty(name="Clip", description="The game animation to load on the selected agent")
     wm.cs2rig_match_clips = BoolProperty(
@@ -1743,6 +1982,19 @@ def register():
         description="List only clips made for the kind of weapon the agent holds, so it sits in the hands. Untick to see every clip",
         default=True,
         update=lambda self, context: _fill_clips(context),
+    )
+    wm.cs2rig_studio_preset = EnumProperty(
+        name="Lighting",
+        description="Studio lighting and backdrop mood",
+        items=_studio_preset_items,
+        default="studio",
+        update=_on_studio_setting_changed,
+    )
+    wm.cs2rig_studio_backdrop = BoolProperty(
+        name="Backdrop",
+        description="Show the seamless curved studio backdrop behind the subject",
+        default=True,
+        update=_on_studio_setting_changed,
     )
     wm.cs2rig_error = StringProperty(name="Last Error")
 
@@ -1762,7 +2014,7 @@ def unregister():
         atexit.unregister(_cancel_jobs)
         _exit_hooked = False
     wm = bpy.types.WindowManager
-    for name in ("cs2rig_error", "cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
+    for name in ("cs2rig_error", "cs2rig_studio_backdrop", "cs2rig_studio_preset", "cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_sky", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

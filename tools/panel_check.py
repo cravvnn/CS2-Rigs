@@ -292,7 +292,7 @@ def draw_full(context):
     agent_only = draw("agent, no weapon yet", context)
     assert "Next: choose a weapon and press Hold Weapon." in agent_only["texts"]
     assert "cs2rig.build_rig" in agent_only["operators"]
-    assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} <= set(visible_sections(agent_only))
+    assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Studio", "Tools"} <= set(visible_sections(agent_only))
     wm.cs2rig_weapon = "ak47"
     assert bpy.ops.cs2rig.attach_weapon() == {"FINISHED"}
     wm.cs2rig_skin = "gs_ak47_bloodsport"
@@ -344,8 +344,13 @@ LABELS = {
     cs2_rigs.CS2RIG_OT_show_preferences: "Set Game Folder...",
     cs2_rigs.CS2RIG_OT_fix_eyes: "Rebuild Eye Materials",
     cs2_rigs.CS2RIG_OT_build_clip_previews: "Build Clip Thumbnails",
+    cs2_rigs.CS2RIG_OT_import_weapon: "Import Weapon",
     cs2_rigs.CS2RIG_OT_build_rig: "Add Pose Controls",
     cs2_rigs.CS2RIG_OT_remove_rig: "Remove Pose Controls",
+    cs2_rigs.CS2RIG_OT_add_studio: "Add Studio",
+    cs2_rigs.CS2RIG_OT_remove_studio: "Remove Studio",
+    cs2_rigs.CS2RIG_OT_frame_studio: "Frame Subject",
+    cs2_rigs.CS2RIG_OT_toggle_turntable: "Turntable",
 }
 for operator, label in LABELS.items():
     assert operator.bl_label == label, (operator.bl_idname, operator.bl_label)
@@ -361,7 +366,10 @@ PROPERTY_NAMES = {
     "cs2rig_glove_seed": "Glove Seed",
     "cs2rig_map": "Map",
     "cs2rig_map_link": "Link to Map File",
+    "cs2rig_map_sky": "Map Sky & Lights",
     "cs2rig_clip": "Clip",
+    "cs2rig_studio_preset": "Lighting",
+    "cs2rig_studio_backdrop": "Backdrop",
 }
 for name, label in PROPERTY_NAMES.items():
     assert bpy.types.WindowManager.bl_rna.properties[name].name == label, (name, bpy.types.WindowManager.bl_rna.properties[name].name)
@@ -381,17 +389,37 @@ updater.status = "current"
 empty = draw("empty, before reading the game files", context)
 assert visible_sections(empty) == [], visible_sections(empty)
 assert "Read Game Files" in empty["texts"]
-assert "Next: read the game files, then import an agent." in empty["texts"]
+assert "Next: read the game files, then import an agent or weapon." in empty["texts"]
 
 assert bpy.ops.cs2rig.refresh() == {"FINISHED"}
 no_agent = draw("after reading, no agent", context)
-assert "Agent" in visible_sections(no_agent) and "Weapon" not in visible_sections(no_agent), visible_sections(no_agent)
-assert {"Agent", "Map", "Tools"} <= set(visible_sections(no_agent)), visible_sections(no_agent)
-assert "Next: choose an agent and press Import Agent." in no_agent["texts"]
+assert {"Agent", "Weapon", "Map", "Studio", "Tools"} == set(visible_sections(no_agent)), visible_sections(no_agent)
+assert "cs2rig.import_weapon" in no_agent["operators"]
+assert "No weapon imported." in no_agent["texts"]
+assert "Next: import an agent or a weapon." in no_agent["texts"]
+
+# Standalone weapon workflow, without any agent in the scene.
+wm.cs2rig_weapon = "ak47"
+assert bpy.ops.cs2rig.import_weapon() == {"FINISHED"}
+solo_stock = draw("standalone weapon, stock", context)
+assert {"Agent", "Weapon", "Map", "Studio", "Tools"} == set(visible_sections(solo_stock)), visible_sections(solo_stock)
+assert "Acting on AK-47" in solo_stock["texts"], solo_stock["texts"]
+assert "Next: choose a finish and press Apply Finish." in solo_stock["texts"], solo_stock["texts"]
+assert {"cs2rig.import_weapon", "cs2rig.remove_weapon", "cs2rig.apply_skin", "cs2rig.remove_skin"} <= set(solo_stock["operators"])
+assert {"cs2rig_skin", "cs2rig_wear", "cs2rig_seed"} <= set(solo_stock["names"])
+wm.cs2rig_skin = "gs_ak47_bloodsport"
+wm.cs2rig_wear, wm.cs2rig_seed = 0.15, 42
+assert bpy.ops.cs2rig.apply_skin() == {"FINISHED"}
+solo_painted = draw("standalone weapon, painted", context)
+assert "Applied: Bloodsport · wear 0.15 · seed 42" in solo_painted["texts"], solo_painted["texts"]
+solo_closed = draw("standalone weapon, collapsed", context, all_closed=True)
+assert solo_closed["sections"]["cs2rig_weapon"]["header_texts"] == ["Weapon", "AK-47 · Bloodsport"]
+assert bpy.ops.cs2rig.remove_skin() == {"FINISHED"}
+assert bpy.ops.cs2rig.remove_weapon() == {"FINISHED"}
 
 draw_full(context)
 full = draw("agent, weapon, finish, gloves, controls and map", context)
-assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Tools"} == set(visible_sections(full)), visible_sections(full)
+assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Studio", "Tools"} == set(visible_sections(full)), visible_sections(full)
 # Open headers show only the section title (no summary clutter).
 for sec_id, expected_title in (
     ("cs2rig_agent", "Agent"),
@@ -400,6 +428,7 @@ for sec_id, expected_title in (
     ("cs2rig_animation", "Animation"),
     ("cs2rig_pose", "Pose Controls"),
     ("cs2rig_map", "Map"),
+    ("cs2rig_studio", "Studio"),
     ("cs2rig_tools", "Tools"),
 ):
     assert full["sections"][sec_id]["header_texts"] == [expected_title], full["sections"][sec_id]
@@ -410,12 +439,16 @@ for expected in (
     "cs2rig_glove",
     "cs2rig_glove_wear",
     "cs2rig_glove_seed",
+    "cs2rig_map_sky",
     "cs2rig_match_clips",
+    "cs2rig_studio_preset",
+    "cs2rig_studio_backdrop",
     '["ik_arm_L"]',
 ):
     assert expected in full["names"], f"the panel did not draw {expected}"
 for expected in (
     "cs2rig.attach_weapon",
+    "cs2rig.import_weapon",
     "cs2rig.apply_skin",
     "cs2rig.apply_gloves",
     "cs2rig.load_clip",
@@ -424,6 +457,8 @@ for expected in (
     "cs2rig.remove_rig",
     "cs2rig.add_map",
     "cs2rig.remove_map",
+    "cs2rig.apply_map_sky",
+    "cs2rig.add_studio",
     "cs2rig.build_clip_previews",
     "cs2rig.fix_eyes",
 ):
@@ -450,7 +485,20 @@ assert closed["sections"]["cs2rig_gloves"]["header_texts"] == ["Gloves", "Driver
 assert closed["sections"]["cs2rig_animation"]["header_texts"] == ["Animation", "run_n_rifle"]
 assert closed["sections"]["cs2rig_pose"]["header_texts"] == ["Pose Controls", "On"]
 assert closed["sections"]["cs2rig_map"]["header_texts"] == ["Map", "de_dust2_vanity"]
+assert closed["sections"]["cs2rig_studio"]["header_texts"] == ["Studio", "Off"]
 assert closed["sections"]["cs2rig_tools"]["header_texts"] == ["Tools"]
+
+# Studio Kit active, turntable toggled on, then cleanly removed.
+assert bpy.ops.cs2rig.add_studio() == {"FINISHED"}
+studio_on = draw("studio active", context)
+for expected in ("cs2rig.frame_studio", "cs2rig.toggle_turntable", "cs2rig.remove_studio"):
+    assert expected in studio_on["operators"], f"the panel did not draw {expected}"
+assert bpy.ops.cs2rig.toggle_turntable() == {"FINISHED"}
+studio_closed = draw("studio active with turntable, closed", context, all_closed=True)
+assert studio_closed["sections"]["cs2rig_studio"]["header_texts"] == ["Studio", "Studio · Turntable"]
+assert bpy.ops.cs2rig.frame_studio() == {"FINISHED"}
+assert bpy.ops.cs2rig.remove_studio() == {"FINISHED"}
+assert not cs2_rigs.studio.has_studio(context.scene)
 
 # A map whose built file came from older game files gets a Rebuild button.
 real_newer = cs2_rigs.maps.newer_build_possible

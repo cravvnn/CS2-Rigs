@@ -42,6 +42,16 @@ meshes = [o for o in top.all_objects if o.type == "MESH"]
 lights = [o for o in top.all_objects if o.type == "LIGHT"]
 print("MAP objects:", len(meshes), "meshes,", len(lights), "lights, collections", [c.name for c in top.children])
 assert len(meshes) > 100
+lights_group = next((c for c in top.children if c.name.endswith("_lights")), None)
+if lights_group is not None:
+    assert len(lights_group.objects) == len(lights) > 0, "the lights are not in their own collection"
+world = scene.world
+print("MAP sky:", world.name, "map", world.get("cs2rig_map"), "strength", world.get("cs2rig_sky_strength"))
+if world.get("cs2rig_map") == name:
+    environment = next((n for n in world.node_tree.nodes if n.type == "TEX_ENVIRONMENT"), None)
+    assert environment is not None and environment.image is not None, "the real sky has no image"
+    assert tuple(environment.image.size) == (environment.image.size[1] * 2, environment.image.size[1]), environment.image.size
+    print("MAP sky image:", environment.image.name, tuple(environment.image.size), "packed", bool(environment.image.packed_file))
 
 corners = [o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
 low = Vector(min(c[i] for c in corners) for i in range(3))
@@ -77,7 +87,7 @@ print(f"MAP appended in {time.time() - started:.0f} s")
 # The panel builds on a worker thread; run that path with a small backdrop map and a broken one.
 from cs2_rigs.core.catalog import GameMap  # noqa: E402
 
-backdrop = next(m for m in cs2_rigs._maps.values() if m.is_backdrop and m.name.startswith(name))
+backdrop = next(m for m in cs2_rigs._maps.values() if m.is_backdrop and m.name != name)
 for game_map, should_work in ((backdrop, True), (GameMap("no_such_map", str(Path(backdrop.package).with_name("no_such_map.vpk"))), False)):
     job = maps.BuildJob(session.get(), game_map)
     while job.running:

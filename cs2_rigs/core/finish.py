@@ -94,6 +94,7 @@ _TOKEN = re.compile(
     r"""
     \s*(?:
       (?P<blob>\#\[[^\]]*\])
+    | (?P<triple>\"\"\"(?:[^\"]|\"(?!\"\"))*\"\"\")
     | (?P<punct>[{}\[\],=])
     | (?:(?P<prefix>[A-Za-z_]+):)?"(?P<string>(?:[^"\\]|\\.)*)"
     | (?P<word>[^\s{}\[\],="]+)
@@ -114,6 +115,8 @@ def parse_kv3(text: str):
         kind = match.lastgroup
         if kind == "blob":
             tokens.append(("value", None))
+        elif kind == "triple":
+            tokens.append(("value", match.group("triple")[3:-3]))
         elif kind == "punct":
             tokens.append((match.group("punct"), None))
         elif kind == "string":

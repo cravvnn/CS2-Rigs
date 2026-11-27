@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import os
 import shutil
 import subprocess
@@ -12,10 +13,10 @@ from pathlib import Path
 import bpy
 
 from .core import log as log_mod
-from .core import maplib, proc
+from .core import maplib, maplights, proc
 from .core.catalog import GameMap
 from .core.converter import failure_message
-from .map_build import MAP_NAME_PROP
+from .map_build import MAP_NAME_PROP, SKY_WORLD_PROP
 from .session import Session
 
 BUILD_SCRIPT = Path(__file__).with_name("map_build.py")
@@ -24,6 +25,9 @@ STALE_EXPORT_SECONDS = 7200
 SKY_WORLD = "CS2 Rigs Sky"
 SKY_COLOUR = (0.45, 0.62, 0.85)
 SKY_STRENGTH = 0.3  # fill light only; the map's own sun does the rest
+SKY_WORLD_PREFIX = "CS2 Sky "
+LIGHTS_SUFFIX = "_lights"
+EXTRAS_NAME = "map_extras.json"
 
 
 def library_path(session: Session, game_map: GameMap) -> Path:
@@ -100,6 +104,32 @@ def _remove_old_exports(folder: Path) -> None:
             old.unlink(missing_ok=True)
 
 
+def _write_extras(session: Session, game_map: GameMap, export_dir: Path) -> Path | None:
+    """Read the map's sky and lights next to the geometry, for map_build.py.
+
+    A map without an entity lump, or whose sky cannot be exported, still builds:
+    it just keeps the glTF sun and the fallback sky.
+    """
+    try:
+        extras = maplights.extract(
+            session.converter,
+            Path(game_map.package),
+            Path(session.install.main_package),
+            game_map.name,
+            export_dir / "sky",
+        )
+    except Exception as exc:  # the geometry is still worth building
+        log_mod.logger.warning("could not read the sky and lights of %s: %s", game_map.name, exc)
+        return None
+    path = export_dir / EXTRAS_NAME
+    try:
+        path.write_text(json.dumps(extras.as_dict(), separators=(",", ":")), encoding="utf-8")
+    except OSError as exc:
+        log_mod.logger.warning("could not store the sky and lights of %s: %s", game_map.name, exc)
+        return None
+    return path
+
+
 def build_library(session: Session, game_map: GameMap, blender: str, force: bool = False) -> Path:
     """Convert a map and build its library file. Slow, and safe to run off the main thread.
 
@@ -121,7 +151,10 @@ def build_library(session: Session, game_map: GameMap, blender: str, force: bool
     except Exception:
         shutil.rmtree(export_dir, ignore_errors=True)
         raise
+    extras_path = _write_extras(session, game_map, export_dir)
     command = [blender, "--background", "--factory-startup", "--python", str(BUILD_SCRIPT), "--", str(glb), str(partial), game_map.name]
+    if extras_path is not None:
+        command.append(str(extras_path))
     try:
         process = subprocess.Popen(
             command,
@@ -291,6 +324,9 @@ def remove_map(scene: bpy.types.Scene, name: str) -> None:
     top = maps_in_scene(scene).get(name)
     if top is None:
         return
+    map_world = scene.world if scene.world is not None and scene.world.get(MAP_NAME_PROP) == name else None
+    if map_world is not None:
+        scene.world = None
     collections = [top, *top.children_recursive]
     objects = list(top.all_objects)
     datas = {obj.data for obj in objects if obj.data is not None}
@@ -298,12 +334,57 @@ def remove_map(scene: bpy.types.Scene, name: str) -> None:
     bpy.data.batch_remove(collections)
     # Materials and textures are left for Blender to drop when the file is saved and reopened.
     bpy.data.batch_remove([data for data in datas if data.users == 0])
+    if map_world is not None and map_world.users == 0:
+        bpy.data.worlds.remove(map_world)
 
 
-def add_sky(scene: bpy.types.Scene) -> bool:
-    """Give a scene without a world a plain daylight sky, since maps carry no baked lighting."""
-    if scene.world is not None:
+def sky_world_name(name: str) -> str:
+    return f"{SKY_WORLD_PREFIX}{name}"
+
+
+def lights_collection(collection: bpy.types.Collection) -> bpy.types.Collection | None:
+    return next((child for child in collection.children if child.name.endswith(LIGHTS_SUFFIX)), None)
+
+
+def show_map_lights(collection: bpy.types.Collection, on: bool) -> bool:
+    """Show or hide a map's lights, for a map that has them. False when it has none."""
+    lights = lights_collection(collection)
+    if lights is None:
         return False
+    lights.hide_viewport = not on
+    lights.hide_render = not on
+    return True
+
+
+def _map_world(name: str, library: Path | None, collection: bpy.types.Collection, link: bool) -> bpy.types.World | None:
+    """The map's sky World from its library, linked or copied to match the map."""
+    stored = collection.get(SKY_WORLD_PROP)
+    expected = str(stored) if stored else sky_world_name(name)
+    source_file = Path(bpy.path.abspath(collection.library.filepath)) if collection.library is not None else None
+    for world in bpy.data.worlds:
+        if world.get(MAP_NAME_PROP) != name:
+            continue
+        if source_file is not None:
+            if world.library is not None and Path(bpy.path.abspath(world.library.filepath)) == source_file:
+                return world
+        elif not link and world.library is None:
+            return world
+    if library is None:
+        return None
+    library = Path(bpy.path.abspath(str(library)))
+    if not library.is_file():
+        return None
+    try:
+        with bpy.data.libraries.load(str(library), link=link) as (source, target):
+            if expected not in source.worlds:
+                return None
+            target.worlds = [expected]
+    except (OSError, RuntimeError):
+        return None
+    return target.worlds[0] if target.worlds else None
+
+
+def _plain_world() -> bpy.types.World:
     world = bpy.data.worlds.get(SKY_WORLD) or bpy.data.worlds.new(SKY_WORLD)
     world.color = SKY_COLOUR
     # A world with nodes ignores its plain colour.
@@ -311,5 +392,61 @@ def add_sky(scene: bpy.types.Scene) -> bool:
         if node.type == "BACKGROUND":
             node.inputs["Color"].default_value = (*SKY_COLOUR, 1.0)
             node.inputs["Strength"].default_value = SKY_STRENGTH
+    return world
+
+
+def _is_factory_default_world(world: bpy.types.World) -> bool:
+    """True for Blender's untouched startup 'World' (plain grey Background, no images or links)."""
+    if world.library is not None or world.name != "World" or world.get(MAP_NAME_PROP):
+        return False
+    tree = world.node_tree
+    if tree is None:
+        return True
+    if any(n.type not in ("BACKGROUND", "OUTPUT_WORLD") for n in tree.nodes):
+        return False
+    bg = next((n for n in tree.nodes if n.type == "BACKGROUND"), None)
+    if bg is None or bg.inputs["Color"].is_linked or bg.inputs["Strength"].is_linked:
+        return False
+    col = bg.inputs["Color"].default_value
+    return abs(col[0] - 0.050876) < 0.01 and abs(col[1] - 0.050876) < 0.01 and abs(col[2] - 0.050876) < 0.01
+
+
+def add_sky(
+    scene: bpy.types.Scene,
+    name: str = "",
+    library: Path | None = None,
+    collection: bpy.types.Collection | None = None,
+    link: bool = True,
+    use_map: bool = True,
+) -> bool:
+    """Give a scene without a custom world a sky, using the map's own when it has one.
+
+    `use_map` also shows the map's lights; with it off the old plain sky is used
+    and the lights stay hidden, which keeps a linked map's geometry cheap.
+    """
+    if collection is not None:
+        show_map_lights(collection, use_map)
+    if scene.world is not None and not _is_factory_default_world(scene.world) and scene.world.name != SKY_WORLD:
+        return False
+    world = None
+    if use_map and collection is not None and name:
+        world = _map_world(name, library, collection, link)
+    if world is None:
+        world = _plain_world()
     scene.world = world
+    return True
+
+
+def apply_map_sky(
+    scene: bpy.types.Scene,
+    name: str,
+    library: Path | None,
+    collection: bpy.types.Collection,
+) -> bool:
+    """Put this map's real sky in the scene and show its lights again."""
+    world = _map_world(name, library, collection, collection.library is not None)
+    if world is None:
+        return False
+    scene.world = world
+    show_map_lights(collection, True)
     return True

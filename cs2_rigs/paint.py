@@ -1,4 +1,4 @@
-"""Put a finish on the weapon an agent holds.
+"""Put a finish on a held or standalone weapon.
 
 The finish's colour and surface textures are composed from the game's own
 inputs, as the game does it, for a chosen wear and pattern seed. Effects the
@@ -21,6 +21,7 @@ from .core import finish as finish_mod
 from .core import png
 from .core import proc
 from .core import skins as skins_mod
+from .core import targets
 from .session import Session, SetupError
 
 SKIN_PROP = "cs2rig_skin"  # on the weapon root: the kit it wears
@@ -30,28 +31,20 @@ BASE_MATERIAL_PROP = "cs2rig_base_material"  # on a painted material: the materi
 VMAT_PROP = "vmat"  # the game material an imported material came from
 TEXTURE_SIZE = 2048
 EXPORT_WORKERS = 4  # textures converted at once; the converter's staging is per process and thread
-LEGACY_MARK, CURRENT_MARK = "legacy", "_hd"
+LEGACY_MARK, CURRENT_MARK = targets.LEGACY_MARK, targets.CURRENT_MARK
 WEAPON_TEXTURES = ("g_tColor", "g_tMetalness", "g_tAmbientOcclusion", "g_tMasks")
 SHAPE_TEXTURES = ("g_tPosition", "g_tSurface")
 SHARED_TEXTURES = ("g_tWear", "g_tGrunge")
 
 
-def _bodies(armature: bpy.types.Object) -> tuple[bpy.types.Object | None, bpy.types.Object | None]:
-    """The held weapon's old-layout body and its current one; either can be missing.
+def _bodies(target: bpy.types.Object) -> tuple[bpy.types.Object | None, bpy.types.Object | None]:
+    """The weapon's old-layout body and its current one; either can be missing.
 
     Files imported by 0.3.0 carry the role on each body, so renaming one does not
     lose it; older files fall back to the names the importer gave them.
     """
-    meshes = [obj for obj in importer.held_weapon_objects(armature) if obj.type == "MESH"]
-    legacy = next((obj for obj in meshes if obj.get(importer.BODY_KIND_PROP) == "legacy"), None)
-    current = next((obj for obj in meshes if obj.get(importer.BODY_KIND_PROP) == "current"), None)
-    if legacy is None:
-        legacy = next((obj for obj in meshes if LEGACY_MARK in obj.name), None)
-    if current is None:
-        current = next((obj for obj in meshes if CURRENT_MARK in obj.name), None)
-    if current is None:
-        current = next((obj for obj in meshes if obj is not legacy), None)
-    return legacy, current
+    meshes = [obj for obj in importer.weapon_objects(target) if obj.type == "MESH"]
+    return targets.select_weapon_bodies(meshes)
 
 
 def _show_only(shown: bpy.types.Object, other: bpy.types.Object | None) -> None:
@@ -282,22 +275,22 @@ def set_images(material: bpy.types.Material, files: dict) -> None:
             normal.image = _load(files["normal"], colour=False)
 
 
-def worn_skin(armature: bpy.types.Object) -> str:
-    """The name of the kit on the held weapon, or ''."""
-    return next((obj[SKIN_PROP] for obj in armature.children_recursive if SKIN_PROP in obj.keys()), "")
+def worn_skin(target: bpy.types.Object) -> str:
+    """The name of the kit on the held or standalone weapon, or ''."""
+    return next((obj[SKIN_PROP] for obj in importer.weapon_objects(target) if SKIN_PROP in obj.keys()), "")
 
 
-def worn_skin_settings(armature: bpy.types.Object) -> tuple[str, float, int] | None:
-    """The finish on the held weapon with its wear and seed, or None."""
-    root = next((obj for obj in armature.children_recursive if SKIN_PROP in obj.keys()), None)
+def worn_skin_settings(target: bpy.types.Object) -> tuple[str, float, int] | None:
+    """The finish on the held or standalone weapon with its wear and seed, or None."""
+    root = next((obj for obj in importer.weapon_objects(target) if SKIN_PROP in obj.keys()), None)
     if root is None:
         return None
     return root[SKIN_PROP], float(root.get(WEAR_PROP, 0.0)), int(root.get(SEED_PROP, 0))
 
 
-def remove_skin(armature: bpy.types.Object) -> None:
-    """Give the held weapon its stock look back."""
-    for obj in importer.held_weapon_objects(armature):
+def remove_skin(target: bpy.types.Object) -> None:
+    """Give the held or standalone weapon its stock look back."""
+    for obj in importer.weapon_objects(target):
         for prop in (SKIN_PROP, WEAR_PROP, SEED_PROP):
             if prop in obj.keys():
                 del obj[prop]
@@ -313,17 +306,19 @@ def remove_skin(armature: bpy.types.Object) -> None:
             slot.material = base
             if painted.users == 0:
                 bpy.data.materials.remove(painted)
-    legacy, current = _bodies(armature)
+    legacy, current = _bodies(target)
     if current is not None:
         _show_only(current, legacy)
 
 
-def _paint_slot(session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit) -> tuple[bpy.types.Object, int, str]:
+def _paint_slot(session: Session, target: bpy.types.Object, kit: skins_mod.PaintKit) -> tuple[bpy.types.Object, int, str]:
     """The weapon body that takes this finish, the slot to paint and its game material."""
-    legacy, current = _bodies(armature)
+    legacy, current = _bodies(target)
     body = legacy if skins_mod.uses_legacy_model(kit) and legacy is not None else current or legacy
     if body is None:
-        raise RuntimeError("The agent holds no weapon to paint.")
+        if importer.is_agent(target):
+            raise RuntimeError("The agent holds no weapon to paint.")
+        raise RuntimeError("No weapon mesh found to paint.")
     for index, candidate in enumerate(body.material_slots):
         source = _game_material(candidate.material)
         # A body also carries small helper materials; the one that takes paint names its paint inputs.
@@ -342,14 +337,16 @@ class FinishJob:
     returns True. A finish already in the cache is put on in a single step.
     """
 
-    def __init__(self, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0):
+    def __init__(self, session: Session, target: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0):
         self.session, self.kit, self.seed = session, kit, seed
         self.wear = min(max(wear, kit.wear_min), kit.wear_max)  # what the scene keeps
         self.paint_wear = round(self.wear, 3)  # what the images are made with, and the cache key
-        self.armature_name = armature.name
-        self.instance = importer.instance_id(armature)
-        body, self.slot_index, self.body_material = _paint_slot(session, armature, kit)
+        self.target_name = target.name
+        self.armature_name = target.name  # kept for callers expecting the old attribute name
+        self.instance = importer.instance_id(target)
+        body, self.slot_index, self.body_material = _paint_slot(session, target, kit)
         self.body_name = body.name
+        self.body_instance = importer.instance_id(body)
         self.out_dir = session.cache.finish_dir(_finish_key(kit, self.body_material, self.paint_wear, seed))
         self.missing: list[str] = []
         self.stage = "Converting the game's files"
@@ -386,6 +383,14 @@ class FinishJob:
         if self._files is None:
             shutil.rmtree(self.out_dir, ignore_errors=True)
 
+    def target(self) -> bpy.types.Object | None:
+        """The agent or standalone weapon this job is for, by its stamped id so a rename does not lose it."""
+        if self.instance:
+            found = importer.find_instance(self.instance)
+            if found is not None:
+                return found
+        return bpy.data.objects.get(self.target_name)
+
     @property
     def busy(self) -> bool:
         return self._thread is not None and self._thread.is_alive()
@@ -418,13 +423,13 @@ class FinishJob:
             shutil.rmtree(self.out_dir, ignore_errors=True)
 
     def _apply(self) -> None:
-        armature = importer.find_instance(self.instance) or bpy.data.objects.get(self.armature_name)
-        if armature is None or armature.type != "ARMATURE":
-            raise RuntimeError("The agent was removed before its finish was ready.")
-        body = bpy.data.objects.get(self.body_name)
+        target = self.target()
+        if target is None:
+            raise RuntimeError("The weapon was removed before its finish was ready.")
+        body = (importer.find_instance(self.body_instance) if self.body_instance else None) or bpy.data.objects.get(self.body_name)
         if body is None or body.type != "MESH":
             raise RuntimeError("The weapon was removed before its finish was ready.")
-        remove_skin(armature)
+        remove_skin(target)
         if self.slot_index >= len(body.material_slots) or body.material_slots[self.slot_index].material is None:
             raise RuntimeError(f"{body.name} has no material a finish can go on.")
         slot = body.material_slots[self.slot_index]
@@ -436,9 +441,9 @@ class FinishJob:
         slot.material = painted
         set_images(painted, self._files)
 
-        legacy, current = _bodies(armature)
+        legacy, current = _bodies(target)
         _show_only(body, legacy if body is current else current)
-        root = next((obj for obj in importer.held_weapon_objects(armature) if importer.WEAPON_KEY_PROP in obj.keys()), body)
+        root = importer.weapon_root(target) or body
         root[SKIN_PROP] = self.kit.name
         root[WEAR_PROP] = self.wear
         root[SEED_PROP] = self.seed
@@ -461,9 +466,9 @@ class FinishJob:
         return True
 
 
-def apply_skin(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0) -> list[str]:
-    """Paint the held weapon, waiting for the finish to be ready. Returns the parts that are not shown, in words."""
-    job = FinishJob(session, armature, kit, wear, seed)
+def apply_skin(context: bpy.types.Context, session: Session, target: bpy.types.Object, kit: skins_mod.PaintKit, wear: float = 0.0, seed: int = 0) -> list[str]:
+    """Paint the held or standalone weapon, waiting for the finish to be ready. Returns the parts that are not shown, in words."""
+    job = FinishJob(session, target, kit, wear, seed)
     while not job.step(context):
         job.wait()
     return job.missing

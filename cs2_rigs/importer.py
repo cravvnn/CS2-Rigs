@@ -15,21 +15,33 @@ from . import eyes
 from .core import catalog as catalog_mod
 from .core import clipdata
 from .core import glb as glb_mod
+from .core import targets
 from .core.catalog import Agent, Weapon
+from .core.targets import (
+    AGENT_KEY_PROP,
+    AGENT_ROLE,
+    BODY_KIND_PROP,
+    CLIP_KEY_PROP,
+    COMPOSED_PROP,
+    DEFAULT_GLOVES_ROLE,
+    GLOVE_ROLE,
+    INSTANCE_PROP,
+    ROLE_PROP,
+    WEAPON_BODY_ROLE,
+    WEAPON_KEY_PROP,
+    WEAPON_ROOT_ROLE,
+    held_weapon_key,
+    held_weapon_objects,
+    held_weapon_root,
+    is_agent,
+    is_standalone_weapon,
+    is_weapon_root,
+    weapon_key,
+    weapon_objects,
+    weapon_root,
+)
 from .session import WEAPON_RIG_CLIP, Session
 
-AGENT_KEY_PROP = "cs2rig_agent"
-WEAPON_KEY_PROP = "cs2rig_weapon"
-CLIP_KEY_PROP = "cs2rig_clip"
-COMPOSED_PROP = "cs2rig_composed"  # an additive clip shown over the bind pose
-INSTANCE_PROP = "cs2rig_instance"  # one imported agent, so a job still finds it after a rename
-ROLE_PROP = "cs2rig_role"  # what an imported object is, found without relying on its name
-BODY_KIND_PROP = "cs2rig_body"  # "legacy" or "current" on a weapon body
-AGENT_ROLE = "agent"
-DEFAULT_GLOVES_ROLE = "default_gloves"
-GLOVE_ROLE = "glove"
-WEAPON_ROOT_ROLE = "weapon_root"
-WEAPON_BODY_ROLE = "weapon_body"
 DEFAULT_GLOVES_PART = "thirdperson_default_gloves"  # the agent's own mesh for its hands
 WEAPON_BONE = "wpn"
 WEAPON_ROOT_BONE = "weapon"  # the root bone of weapon models
@@ -180,28 +192,12 @@ def _game_rest_matrix(glb_path: Path, node: str) -> Matrix:
     return to_blender @ game @ to_blender.inverted()
 
 
-def held_weapon_objects(armature: bpy.types.Object) -> list[bpy.types.Object]:
-    return [obj for obj in armature.children_recursive if obj.get(WEAPON_KEY_PROP) or (obj.parent and obj.parent.get(WEAPON_KEY_PROP))]
-
-
-def held_weapon_root(armature: bpy.types.Object) -> bpy.types.Object | None:
-    """The held weapon's skeleton object, which carries its catalogue key."""
-    return next(
-        (
-            obj
-            for obj in armature.children_recursive
-            if obj.get(ROLE_PROP) == WEAPON_ROOT_ROLE or WEAPON_KEY_PROP in obj.keys()
-        ),
-        None,
-    )
-
-
-def instance_id(armature: bpy.types.Object) -> str:
-    """The agent's id, made unique first: Shift+D copies it to the duplicate."""
-    value = armature.get(INSTANCE_PROP, "")
-    if not value or any(obj is not armature and obj.get(INSTANCE_PROP) == value for obj in bpy.data.objects):
+def instance_id(obj: bpy.types.Object) -> str:
+    """An imported object's id, made unique first: Shift+D copies it to the duplicate."""
+    value = obj.get(INSTANCE_PROP, "")
+    if not value or any(other is not obj and other.get(INSTANCE_PROP) == value for other in bpy.data.objects):
         value = uuid.uuid4().hex
-        armature[INSTANCE_PROP] = value
+        obj[INSTANCE_PROP] = value
     return value
 
 
@@ -210,43 +206,30 @@ def find_instance(instance: str) -> bpy.types.Object | None:
     return next((obj for obj in bpy.data.objects if obj.get(INSTANCE_PROP) == instance), None)
 
 
-def is_agent(obj: bpy.types.Object | None) -> bool:
-    return obj is not None and obj.type == "ARMATURE" and (
-        obj.get(ROLE_PROP) == AGENT_ROLE or AGENT_KEY_PROP in obj.keys()
-    )
-
-
-def held_weapon_key(armature: bpy.types.Object) -> str:
-    """The catalogue key of the weapon the agent holds, or '' when its hands are empty."""
-    root = held_weapon_root(armature)
-    return root[WEAPON_KEY_PROP] if root is not None else ""
-
-
-def remove_weapon(armature: bpy.types.Object) -> None:
-    key = held_weapon_key(armature)
-    for obj in held_weapon_objects(armature):
+def remove_weapon(target: bpy.types.Object) -> None:
+    """Remove an agent's held weapon, or delete a standalone weapon and its empty collection."""
+    root = weapon_root(target)
+    if root is None:
+        return
+    key = root.get(WEAPON_KEY_PROP, "")
+    collections = list(root.users_collection) if is_standalone_weapon(root) else []
+    for obj in [root, *root.children_recursive]:
         bpy.data.objects.remove(obj, do_unlink=True)
+    scene_roots = {scene.collection for scene in bpy.data.scenes}
+    for collection in collections:
+        if collection not in scene_roots and not collection.objects and not collection.children:
+            bpy.data.collections.remove(collection)
     # Clip actions made for this weapon are of no use to anything else.
     for action in [a for a in bpy.data.actions if key and a.get(WEAPON_KEY_PROP) == key and a.users == 0]:
         bpy.data.actions.remove(action)
 
 
-def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.types.Object, weapon: Weapon) -> bpy.types.Object:
-    """Put a weapon on the agent's weapon bone, where third-person clips expect it."""
-    if WEAPON_BONE not in armature.data.bones:
-        raise RuntimeError(f"This agent has no '{WEAPON_BONE}' bone to hold a weapon.")
-    agent = session.agent(armature[AGENT_KEY_PROP])
-    bone_in_game = _game_rest_matrix(ensure_model_export(session, agent), WEAPON_BONE)
+def _export_weapon_glb(session: Session, weapon: Weapon) -> Path:
     # The clip list keeps the export small; a weapon without this clip still gets its skeleton.
-    glb = session.export_model(weapon.model_path, session.cache.model_dir(f"weapon/{weapon.key}"), [WEAPON_RIG_CLIP], materials=True)
+    return session.export_model(weapon.model_path, session.cache.model_dir(f"weapon/{weapon.key}"), [WEAPON_RIG_CLIP], materials=True)
 
-    # The game lines the weapon's own root bone up with the agent's weapon bone,
-    # not the weapon model's origin.
-    try:
-        weapon_root_in_game = _game_rest_matrix(glb, glb_mod.root_joint_name(glb_mod.read_json(glb), WEAPON_ROOT_BONE))
-    except ValueError as exc:
-        raise RuntimeError(f"{weapon.label} cannot be held: {exc}") from exc
 
+def _import_weapon_glb(context: bpy.types.Context, glb: Path) -> tuple[list[bpy.types.Object], bpy.types.Object]:
     actions_before = set(bpy.data.actions)
     objects = _import_glb(context, glb)
     for action in [a for a in bpy.data.actions if a not in actions_before]:
@@ -258,11 +241,14 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     root = roots[0]
     for pose_bone in getattr(root.pose, "bones", []):
         pose_bone.matrix_basis.identity()
+    return objects, root
 
-    remove_weapon(armature)
+
+def _setup_weapon_objects(
+    objects: list[bpy.types.Object], root: bpy.types.Object, weapon: Weapon, collection: bpy.types.Collection
+) -> None:
     meshes = [obj for obj in objects if obj.type == "MESH"]
     has_hd = any("body_hd" in obj.name for obj in meshes)
-    collection = (armature.users_collection or [context.scene.collection])[0]
     for obj in objects:
         for old in list(obj.users_collection):
             old.objects.unlink(obj)
@@ -271,7 +257,7 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
             part = _part_name(obj.name)
             obj.name = f"{weapon.key}.{part}"
             obj[ROLE_PROP] = WEAPON_BODY_ROLE
-            obj[BODY_KIND_PROP] = "legacy" if "legacy" in part else ("current" if "_hd" in part else "part")
+            obj[BODY_KIND_PROP] = targets.weapon_body_kind(part)
             # Weapons ship an older low-detail body next to the current one.
             if has_hd and "legacy" in part:
                 obj.hide_set(True)
@@ -279,6 +265,42 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     root.name = f"{weapon.key}.weapon"
     root[WEAPON_KEY_PROP] = weapon.key
     root[ROLE_PROP] = WEAPON_ROOT_ROLE
+    root[INSTANCE_PROP] = uuid.uuid4().hex
+
+
+def import_weapon(context: bpy.types.Context, session: Session, weapon: Weapon) -> bpy.types.Object:
+    """Import a weapon or knife into the scene on its own, without an agent."""
+    glb = _export_weapon_glb(session, weapon)
+    objects, root = _import_weapon_glb(context, glb)
+    collection = bpy.data.collections.new(weapon.name or weapon.label)
+    context.scene.collection.children.link(collection)
+    _setup_weapon_objects(objects, root, weapon, collection)
+    _make_active(context, root)
+    for obj in objects:
+        obj.select_set(True)
+    return root
+
+
+def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.types.Object, weapon: Weapon) -> bpy.types.Object:
+    """Put a weapon on the agent's weapon bone, where third-person clips expect it."""
+    if WEAPON_BONE not in armature.data.bones:
+        raise RuntimeError(f"This agent has no '{WEAPON_BONE}' bone to hold a weapon.")
+    agent = session.agent(armature[AGENT_KEY_PROP])
+    bone_in_game = _game_rest_matrix(ensure_model_export(session, agent), WEAPON_BONE)
+    glb = _export_weapon_glb(session, weapon)
+
+    # The game lines the weapon's own root bone up with the agent's weapon bone,
+    # not the weapon model's origin.
+    try:
+        weapon_root_in_game = _game_rest_matrix(glb, glb_mod.root_joint_name(glb_mod.read_json(glb), WEAPON_ROOT_BONE))
+    except ValueError as exc:
+        raise RuntimeError(f"{weapon.label} cannot be held: {exc}") from exc
+
+    objects, root = _import_weapon_glb(context, glb)
+
+    remove_weapon(armature)
+    collection = (armature.users_collection or [context.scene.collection])[0]
+    _setup_weapon_objects(objects, root, weapon, collection)
 
     bone = armature.data.bones[WEAPON_BONE]
     root.parent = armature
@@ -301,25 +323,19 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     return root
 
 
-def _agent_above(obj: bpy.types.Object | None) -> bpy.types.Object | None:
-    while obj is not None:
-        if is_agent(obj):
-            return obj
-        obj = obj.parent
-    return None
-
-
 def find_agent_armature(context: bpy.types.Context) -> bpy.types.Object | None:
     """The agent the panel acts on: the active one, else a selected one, else the only one."""
-    agent = _agent_above(context.active_object)
-    if agent is not None:
-        return agent
-    for obj in context.selected_objects:
-        agent = _agent_above(obj)
-        if agent is not None:
-            return agent
-    agents = [obj for obj in context.scene.objects if is_agent(obj)]
-    return agents[0] if len(agents) == 1 else None
+    return targets.find_agent_armature(context.active_object, context.selected_objects, context.scene.objects)
+
+
+def find_standalone_weapon(context: bpy.types.Context) -> bpy.types.Object | None:
+    """The standalone weapon the panel acts on: the active one, else a selected one, else the only one."""
+    return targets.find_standalone_weapon(context.active_object, context.selected_objects, context.scene.objects)
+
+
+def find_weapon_target(context: bpy.types.Context) -> bpy.types.Object | None:
+    """What the Weapon section acts on: an agent (for its held weapon) or a standalone weapon."""
+    return targets.find_weapon_target(context.active_object, context.selected_objects, context.scene.objects)
 
 
 def import_clip_action(context: bpy.types.Context, rig_glb: Path, clip_glb: Path, clip: str, work_dir: Path | None = None) -> bpy.types.Action:
