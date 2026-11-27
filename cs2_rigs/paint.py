@@ -15,7 +15,7 @@ from pathlib import Path
 import bpy
 import numpy as np
 
-from . import importer
+from . import importer, stickers
 from .core import composite
 from .core import finish as finish_mod
 from .core import png
@@ -288,8 +288,9 @@ def worn_skin_settings(target: bpy.types.Object) -> tuple[str, float, int] | Non
     return root[SKIN_PROP], float(root.get(WEAR_PROP, 0.0)), int(root.get(SEED_PROP, 0))
 
 
-def remove_skin(target: bpy.types.Object) -> None:
-    """Give the held or standalone weapon its stock look back."""
+def remove_skin(target: bpy.types.Object, session: Session | None = None) -> None:
+    """Give the held or standalone weapon its stock look back, preserving any applied stickers."""
+    stickers.strip_sticker_materials(target)
     for obj in importer.weapon_objects(target):
         for prop in (SKIN_PROP, WEAR_PROP, SEED_PROP):
             if prop in obj.keys():
@@ -309,6 +310,8 @@ def remove_skin(target: bpy.types.Object) -> None:
     legacy, current = _bodies(target)
     if current is not None:
         _show_only(current, legacy)
+    if session is not None and stickers.applied_stickers(target):
+        stickers.reapply_from_props(session, target, remap=True)
 
 
 def _paint_slot(session: Session, target: bpy.types.Object, kit: skins_mod.PaintKit) -> tuple[bpy.types.Object, int, str]:
@@ -316,8 +319,8 @@ def _paint_slot(session: Session, target: bpy.types.Object, kit: skins_mod.Paint
     legacy, current = _bodies(target)
     body = legacy if skins_mod.uses_legacy_model(kit) and legacy is not None else current or legacy
     if body is None:
-        if importer.is_agent(target):
-            raise RuntimeError("The agent holds no weapon to paint.")
+        if importer.is_character_rig(target):
+            raise RuntimeError("No weapon is held to paint.")
         raise RuntimeError("No weapon mesh found to paint.")
     for index, candidate in enumerate(body.material_slots):
         source = _game_material(candidate.material)
@@ -447,6 +450,8 @@ class FinishJob:
         root[SKIN_PROP] = self.kit.name
         root[WEAR_PROP] = self.wear
         root[SEED_PROP] = self.seed
+        if stickers.applied_stickers(target):
+            stickers.reapply_from_props(self.session, target, remap=True)
 
     def step(self, context: bpy.types.Context) -> bool:
         """Move the job on from the main thread. True once the finish is on the weapon."""

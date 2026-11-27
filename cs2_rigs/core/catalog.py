@@ -14,6 +14,7 @@ CLIP_PREFIX = "animation/anims/"
 # Third-person clips made for gameplay. Menu poses ('ui_anims') use the same
 # skeleton; viewmodel, chicken and egg clips do not fit an agent.
 WORLD_CLIP_PREFIX = "animation/anims/world/"
+VIEWMODEL_CLIP_PREFIX = "animation/anims/viewmodel/"
 BASE_CLIP = "animation/anims/world/knife/_default_knife/idle_knife"
 AGENT_CLIP_PREFIXES = (WORLD_CLIP_PREFIX, CLIP_PREFIX + "ui_anims/")
 WEAPON_PREFIX = "weapons/models/"

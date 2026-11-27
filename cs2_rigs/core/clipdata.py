@@ -342,6 +342,11 @@ PREVIEW_BONES = (
     "leg_upper_R", "leg_lower_R", "ankle_R", "ball_R",
     "wpn",
 )
+VIEWMODEL_PREVIEW_BONES = (
+    "root_motion", "wpn", "wpnTip",
+    "armUpperShoulder_L", "arm_lower_L", "hand_L", "arm_upper_L",
+    "armUpperShoulder_R", "arm_lower_R", "hand_R", "arm_upper_R",
+)
 _SKIP_IN_PREVIEW = ("finger", "twist", "jiggle", "eye", "attach", "_aim", "camera", "empty", "helper", "ik_", "lip", "brow", "jaw")
 
 
@@ -359,10 +364,12 @@ def side_of(bone: str) -> str:
 
 
 def preview_bones(parents: dict[str, str | None], limit: int = 30) -> list[str]:
-    """The bones a stick figure needs: the agent's major bones, or for another skeleton
+    """The bones a stick figure needs: the agent's or viewmodel's major bones, or for another skeleton
     every bone that is not a finger, twist, jiggle or helper, in hierarchy order."""
     if all(bone in parents for bone in PREVIEW_BONES[:-1]):
         return [bone for bone in PREVIEW_BONES if bone in parents]
+    if all(bone in parents for bone in ("root_motion", "wpn", "armUpperShoulder_L", "armUpperShoulder_R")):
+        return [bone for bone in VIEWMODEL_PREVIEW_BONES if bone in parents]
     ordered = []
     children: dict[str | None, list[str]] = {}
     for bone, parent in parents.items():

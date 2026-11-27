@@ -48,6 +48,10 @@ class Cache:
         return self.version_dir / "skins.json"
 
     @property
+    def stickers_file(self) -> Path:
+        return self.version_dir / "stickers.json"
+
+    @property
     def finishes_file(self) -> Path:
         return self.version_dir / "finishes.json"
 
@@ -55,6 +59,11 @@ class Cache:
     def materials_dir(self) -> Path:
         """Parsed material values, one small JSON per material."""
         return self.version_dir / "materials"
+
+    @property
+    def sticker_markup_dir(self) -> Path:
+        """Parsed StickerMarkup slot metadata, one small JSON per weapon model."""
+        return self.version_dir / "sticker_markup"
 
     def finish_dir(self, key: str) -> Path:
         """Where the textures composed for one finish, weapon body, wear and seed are kept."""

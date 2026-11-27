@@ -13,7 +13,7 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, studio, updater
+from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, stickers, studio, updater, viewmodel
 from .core import cache as cache_mod
 from .core import clipdata as clipdata_mod
 from .core import log as log_mod
@@ -21,7 +21,9 @@ from .core import catalog as catalog_mod
 from .core import gloves as gloves_mod
 from .core import proc
 from .core import skins as skins_mod
+from .core import stickers as stickers_mod
 from .core import studio as studio_core
+from .core import viewmodel as vm_core
 from .core.download import CLI_VERSION
 from .map_build import MAP_NAME_PROP
 
@@ -38,15 +40,28 @@ _kits: dict[str, skins_mod.PaintKit] = {}
 _paintable: set[str] = set()  # kits whose recipe is in the game files
 _skin_items: dict[str, list[tuple[str, str, str]]] = {}  # per weapon key
 _glove_items: list[tuple[str, str, str]] = []
+_stickers_by_search: dict[str, stickers_mod.StickerKit] = {}
+_stickers_by_material: dict[str, stickers_mod.StickerKit] = {}
+_sticker_search_by_material: dict[str, str] = {}
 _map_job: maps.BuildJob | None = None
 _preview_job: clip_previews.PreviewJob | None = None
 _glove_job: gloves.GloveJob | None = None
 _finish_job: paint.FinishJob | None = None
 _exit_hooked = False
 _syncing_studio = False
+_syncing_pov = False
+_syncing_sticker = False
+_sticker_slot_items: list[tuple[str, str, str]] = [
+    (str(i), f"Slot {i + 1}", f"Weapon sticker slot {i + 1}")
+    for i in range(stickers_mod.MAX_SLOTS)
+]
 _studio_preset_items: list[tuple[str, str, str]] = [
     (studio_core.PRESETS[key].key, studio_core.PRESETS[key].label, studio_core.PRESETS[key].description)
     for key in studio_core.PRESET_ORDER
+]
+_pov_preset_items: list[tuple[str, str, str]] = [
+    (vm_core.PRESETS[key].key, vm_core.PRESETS[key].label, vm_core.PRESETS[key].description)
+    for key in vm_core.PRESET_ORDER
 ]
 
 
@@ -56,6 +71,137 @@ def _on_studio_setting_changed(self, context) -> None:
         return
     if studio.has_studio(context.scene):
         studio.apply_studio_look(context, self.cs2rig_studio_preset, self.cs2rig_studio_backdrop)
+
+
+def _sync_sticker_controls(context) -> None:
+    """Sync the Stickers controls to the currently selected slot on the active weapon."""
+    global _syncing_sticker
+    if context is None:
+        return
+    wm = context.window_manager
+    target = importer.find_weapon_target(context)
+    slot = int(wm.cs2rig_sticker_slot)
+    applied = stickers.slot_sticker(target, slot) if target is not None else None
+    _syncing_sticker = True
+    try:
+        if applied is not None:
+            search_name = _sticker_search_by_material.get(applied.material, applied.label or applied.material)
+            wm.cs2rig_sticker = search_name
+            wm.cs2rig_sticker_wear = applied.wear
+            off_x, off_y, scale, rot_deg = (
+                applied.offset[0] if applied.offset is not None else 0.0,
+                applied.offset[1] if applied.offset is not None else -0.4,
+                applied.scale if applied.scale is not None else 14.1,
+                applied.rotation_deg if applied.rotation_deg is not None else 0.0,
+            )
+            body, _kind = stickers._active_body(target) if target is not None else (None, "current")
+            if body is not None:
+                for ms in body.material_slots:
+                    mat = ms.material
+                    if mat is None or mat.node_tree is None:
+                        continue
+                    node = next(
+                        (n for n in mat.node_tree.nodes if n.type == "GROUP" and n.get(stickers.STICKER_SLOT_PROP) == slot),
+                        None,
+                    )
+                    if node is not None:
+                        off_x = float(node.inputs["Offset X"].default_value)
+                        off_y = float(node.inputs["Offset Y"].default_value)
+                        scale = float(node.inputs["Scale"].default_value)
+                        rot_deg = float(node.inputs["Rotation Turns"].default_value) * 360.0
+                        break
+            wm.cs2rig_sticker_offset_x = off_x
+            wm.cs2rig_sticker_offset_y = off_y
+            wm.cs2rig_sticker_scale = scale
+            wm.cs2rig_sticker_rotation = rot_deg
+        else:
+            wm.cs2rig_sticker_wear = 0.0
+            wm.cs2rig_sticker_offset_x = 0.0
+            wm.cs2rig_sticker_offset_y = -0.4
+            wm.cs2rig_sticker_scale = 14.1
+            wm.cs2rig_sticker_rotation = 0.0
+    finally:
+        _syncing_sticker = False
+
+
+def _on_sticker_slot_changed(self, context) -> None:
+    if not _syncing_sticker:
+        _sync_sticker_controls(context)
+
+
+def _on_sticker_param_changed(self, context) -> None:
+    """Update the active sticker slot's shader inputs live (<1 ms) when sliders change."""
+    if _syncing_sticker or context is None:
+        return
+    target = importer.find_weapon_target(context)
+    if target is None:
+        return
+    slot = int(self.cs2rig_sticker_slot)
+    if stickers.slot_sticker(target, slot) is None:
+        return
+    stickers.update_slot_live(
+        target,
+        slot,
+        wear=self.cs2rig_sticker_wear,
+        offset=(self.cs2rig_sticker_offset_x, self.cs2rig_sticker_offset_y),
+        scale=self.cs2rig_sticker_scale,
+        rotation_deg=self.cs2rig_sticker_rotation,
+    )
+
+
+def _on_pov_preset_changed(self, context) -> None:
+    """Apply a Classic or Desktop viewmodel preset live to the active first-person rig."""
+    global _syncing_pov
+    if _syncing_pov or context is None or context.scene is None:
+        return
+    preset = self.cs2rig_pov_preset
+    if preset in ("classic", "desktop"):
+        p = vm_core.get_preset(preset)
+        _syncing_pov = True
+        try:
+            self.cs2rig_pov_fov = p.fov
+            self.cs2rig_pov_offset_x, self.cs2rig_pov_offset_y, self.cs2rig_pov_offset_z = p.offset
+        finally:
+            _syncing_pov = False
+    armature = importer.find_viewmodel_arms(context)
+    if armature is not None:
+        viewmodel.apply_pov_settings(
+            armature,
+            preset,
+            self.cs2rig_pov_fov,
+            self.cs2rig_pov_offset_x,
+            self.cs2rig_pov_offset_y,
+            self.cs2rig_pov_offset_z,
+        )
+
+
+def _on_pov_slider_changed(self, context) -> None:
+    """Update POV camera FOV and arms offset live when the user adjusts a slider."""
+    global _syncing_pov
+    if _syncing_pov or context is None or context.scene is None:
+        return
+    detected = vm_core.detect_preset(
+        self.cs2rig_pov_fov,
+        self.cs2rig_pov_offset_x,
+        self.cs2rig_pov_offset_y,
+        self.cs2rig_pov_offset_z,
+    )
+    if self.cs2rig_pov_preset != detected:
+        _syncing_pov = True
+        try:
+            self.cs2rig_pov_preset = detected
+        finally:
+            _syncing_pov = False
+    armature = importer.find_viewmodel_arms(context)
+    if armature is not None:
+        viewmodel.apply_pov_settings(
+            armature,
+            detected,
+            self.cs2rig_pov_fov,
+            self.cs2rig_pov_offset_x,
+            self.cs2rig_pov_offset_y,
+            self.cs2rig_pov_offset_z,
+        )
 
 
 def _cancel_jobs() -> None:
@@ -184,13 +330,18 @@ def _glove_enum(self, context):
 
 
 def _fill_clips(context: bpy.types.Context) -> None:
-    """List the clips to choose from: all of them, or only those made for the held weapon."""
+    """List the clips to choose from: viewmodel clips for a first-person rig, world clips for a third-person agent."""
     wm = context.window_manager
     clips = wm.cs2rig_clips
     clips.clear()
-    if wm.cs2rig_match_clips:
+    rig_target = importer.find_character_rig(context)
+    if importer.is_viewmodel_arms(rig_target):
         paths = [catalog_mod.CLIP_PREFIX + label for label in _clip_labels]
-        weapon = _held_weapon(importer.find_agent_armature(context))
+        weapon = _held_weapon(rig_target) if wm.cs2rig_match_clips else None
+        labels = [catalog_mod.clip_label(path) for path in vm_core.clips_for_fp_weapon(paths, weapon)]
+    elif wm.cs2rig_match_clips:
+        paths = [catalog_mod.CLIP_PREFIX + label for label in _clip_labels]
+        weapon = _held_weapon(rig_target)
         labels = [catalog_mod.clip_label(path) for path in catalog_mod.clips_for_weapon(paths, weapon)]
     else:
         labels = _clip_labels
@@ -233,7 +384,29 @@ def _fill_lists(context: bpy.types.Context, current: session.Session) -> None:
         for kit in gloves_mod.glove_kits(_kits.values())
         if kit.name in _paintable
     ]
+    _fill_stickers(context, current.stickers())
     _fill_clips(context)
+
+
+def _fill_stickers(context: bpy.types.Context, sticker_list: list[stickers_mod.StickerKit]) -> None:
+    """Populate the searchable sticker collection for prop_search."""
+    wm = context.window_manager
+    coll = wm.cs2rig_stickers
+    coll.clear()
+    _stickers_by_search.clear()
+    _stickers_by_material.clear()
+    _sticker_search_by_material.clear()
+
+    label_counts: dict[str, int] = {}
+    for kit in sticker_list:
+        label_counts[kit.label] = label_counts.get(kit.label, 0) + 1
+
+    for kit in sticker_list:
+        display = f"{kit.label} [{kit.id}]" if label_counts[kit.label] > 1 else kit.label
+        _stickers_by_search[display] = kit
+        _stickers_by_material[kit.material] = kit
+        _sticker_search_by_material[kit.material] = display
+        coll.add().name = display
 
 
 def _agent_short(key: str) -> str:
@@ -271,8 +444,8 @@ def _choose(wm, name: str, value, items) -> None:
 
 
 def _sync_to_scene(context: bpy.types.Context) -> None:
-    """Point the panel at what the scene has: studio settings, agent, weapon, finish, gloves and clip."""
-    global _syncing_studio
+    """Point the panel at what the scene has: studio settings, agent/FP rig, weapon, finish, gloves and clip."""
+    global _syncing_studio, _syncing_pov
     wm = context.window_manager
     if studio.has_studio(context.scene):
         _syncing_studio = True
@@ -281,10 +454,19 @@ def _sync_to_scene(context: bpy.types.Context) -> None:
             wm.cs2rig_studio_backdrop = studio.studio_backdrop_enabled(context.scene)
         finally:
             _syncing_studio = False
-    armature = importer.find_agent_armature(context)
+    armature = importer.find_character_rig(context)
     if armature is not None:
         _choose(wm, "cs2rig_agent", armature.get(importer.AGENT_KEY_PROP), _agent_items)
-        _fill_clips(context)  # the clips depend on the held weapon
+        _fill_clips(context)  # the clips depend on the rig type and held weapon
+        if importer.is_viewmodel_arms(armature):
+            preset, fov, ox, oy, oz = viewmodel.read_pov_settings(armature)
+            _syncing_pov = True
+            try:
+                _choose(wm, "cs2rig_pov_preset", preset, _pov_preset_items)
+                wm.cs2rig_pov_fov = fov
+                wm.cs2rig_pov_offset_x, wm.cs2rig_pov_offset_y, wm.cs2rig_pov_offset_z = ox, oy, oz
+            finally:
+                _syncing_pov = False
         glove = gloves.worn_glove_settings(armature)
         if glove is not None:
             _choose(wm, "cs2rig_glove", glove[0], _glove_items)
@@ -300,6 +482,7 @@ def _sync_to_scene(context: bpy.types.Context) -> None:
         if skin is not None:
             _choose(wm, "cs2rig_skin", skin[0], _skin_enum(None, context))
             wm.cs2rig_wear, wm.cs2rig_seed = skin[1], skin[2]
+        _sync_sticker_controls(context)
 
 
 @bpy.app.handlers.persistent
@@ -380,6 +563,10 @@ class CS2RIG_Preferences(bpy.types.AddonPreferences):
 
 class CS2RIG_ClipName(bpy.types.PropertyGroup):
     pass  # the clip path is stored in the built-in `name`
+
+
+class CS2RIG_StickerName(bpy.types.PropertyGroup):
+    pass  # the sticker search label is stored in the built-in `name`
 
 
 class CS2RIG_OT_download_converter(bpy.types.Operator):
@@ -572,18 +759,69 @@ class CS2RIG_OT_import_agent(bpy.types.Operator):
         current = session.get()
         agent = current.agent(context.window_manager.cs2rig_agent)
         importer.import_agent(context, current, agent)
+        _fill_clips(context)
         self.report({"INFO"}, f"Imported {agent.label}.")
         return {"FINISHED"}
 
 
+class CS2RIG_OT_import_viewmodel(bpy.types.Operator):
+    bl_idname = "cs2rig.import_viewmodel"
+    bl_label = "Import First-Person"
+    bl_description = "Import first-person viewmodel arms with the chosen agent's sleeves, gloves and a calibrated POV camera"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return bool(_agent_items)
+
+    @_reports_errors
+    def execute(self, context):
+        current = session.get()
+        wm = context.window_manager
+        agent = current.agent(wm.cs2rig_agent)
+        preset = wm.cs2rig_pov_preset if wm.cs2rig_pov_preset in ("classic", "desktop") else "classic"
+        viewmodel.import_viewmodel(context, current, agent, preset=preset)
+        _sync_to_scene(context)
+        self.report({"INFO"}, f"Imported first-person arms for {agent.label}.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_look_through_pov(bpy.types.Operator):
+    bl_idname = "cs2rig.look_through_pov"
+    bl_label = "Look Through POV Camera"
+    bl_description = "Set the first-person POV camera as the scene camera and switch the viewport to look through it"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return importer.find_viewmodel_arms(context) is not None
+
+    @_reports_errors
+    def execute(self, context):
+        armature = importer.find_viewmodel_arms(context)
+        cam = viewmodel.look_through_pov_camera(context, armature)
+        self.report({"INFO"}, f"Active camera set to {cam.name}.")
+        return {"FINISHED"}
+
+
 class _AgentOperator(bpy.types.Operator):
-    """Base for operators that act on the agent the panel points at."""
+    """Base for operators that act only on a third-person agent."""
 
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
     def poll(cls, context):
         return importer.find_agent_armature(context) is not None
+
+
+class _CharacterOperator(bpy.types.Operator):
+    """Base for operators that act on either a third-person agent or a first-person arms rig."""
+
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return importer.find_character_rig(context) is not None
 
 
 class CS2RIG_OT_fix_eyes(_AgentOperator):
@@ -604,10 +842,10 @@ class CS2RIG_OT_fix_eyes(_AgentOperator):
         return {"FINISHED"}
 
 
-class CS2RIG_OT_load_clip(_AgentOperator):
+class CS2RIG_OT_load_clip(_CharacterOperator):
     bl_idname = "cs2rig.load_clip"
     bl_label = "Load Clip"
-    bl_description = "Convert the chosen game animation and play it on the selected agent"
+    bl_description = "Convert the chosen game animation and play it on the selected agent or first-person rig"
 
     @classmethod
     def poll(cls, context):
@@ -622,19 +860,26 @@ class CS2RIG_OT_load_clip(_AgentOperator):
         if not label:
             _report_error(self, context, "Choose a clip first.")
             return {"CANCELLED"}
-        armature = importer.find_agent_armature(context)
+        armature = importer.find_character_rig(context)
         with importer.working_on(context, armature):
             action = importer.load_clip(context, session.get(), armature, catalog_mod.CLIP_PREFIX + label)
         weapon = _held_weapon(armature)
+        is_fp = importer.is_viewmodel_arms(armature)
+        clip_fam = vm_core.viewmodel_family_of_clip(label) if is_fp else catalog_mod.family_of_clip(label)
+        fits = (
+            weapon is None
+            or not clip_fam
+            or clip_fam in (catalog_mod.clip_family(weapon), catalog_mod.SHARED_CLIP_FAMILY, "arms")
+        )
         if action.get(importer.COMPOSED_PROP):
             self.report({"WARNING"}, f"Loaded {label}. It is additive: the game plays it on top of another clip, so here it is shown over the rest pose.")
-        elif catalog_mod.clip_fits(label, weapon) or not catalog_mod.family_of_clip(label):
+        elif fits:
             self.report({"INFO"}, f"Loaded {label}.")
         else:
             # The weapon bone sits where this clip holds its own kind of weapon.
             self.report(
                 {"WARNING"},
-                f"Loaded {label}, a {catalog_mod.family_of_clip(label)} clip. "
+                f"Loaded {label}, a {clip_fam} clip. "
                 f"The {weapon.label} will not sit in the hands; use a {catalog_mod.clip_family(weapon)} clip.",
             )
         return {"FINISHED"}
@@ -804,10 +1049,10 @@ class CS2RIG_OT_import_weapon(bpy.types.Operator):
         return {"FINISHED"}
 
 
-class CS2RIG_OT_attach_weapon(_AgentOperator):
+class CS2RIG_OT_attach_weapon(_CharacterOperator):
     bl_idname = "cs2rig.attach_weapon"
     bl_label = "Hold Weapon"
-    bl_description = "Convert the chosen weapon and put it in the selected agent's hands, replacing the current one"
+    bl_description = "Convert the chosen weapon and put it in the selected agent's or first-person rig's hands, replacing the current one"
 
     @classmethod
     def poll(cls, context):
@@ -822,7 +1067,7 @@ class CS2RIG_OT_attach_weapon(_AgentOperator):
         if weapon is None:
             _report_error(self, context, "Choose a weapon first.")
             return {"CANCELLED"}
-        armature = importer.find_agent_armature(context)
+        armature = importer.find_character_rig(context)
         with importer.working_on(context, armature):
             importer.attach_weapon(context, session.get(), armature, weapon)
         _fill_clips(context)
@@ -833,7 +1078,7 @@ class CS2RIG_OT_attach_weapon(_AgentOperator):
 class CS2RIG_OT_remove_weapon(bpy.types.Operator):
     bl_idname = "cs2rig.remove_weapon"
     bl_label = "Remove Weapon"
-    bl_description = "Remove the held weapon from the selected agent, or delete the selected standalone weapon"
+    bl_description = "Remove the held weapon from the selected rig, or delete the selected standalone weapon"
     bl_options = {"REGISTER", "UNDO"}
 
     @classmethod
@@ -844,9 +1089,9 @@ class CS2RIG_OT_remove_weapon(bpy.types.Operator):
     @_reports_errors
     def execute(self, context):
         target = importer.find_weapon_target(context)
-        was_agent = importer.is_agent(target)
+        was_rig = importer.is_character_rig(target)
         importer.remove_weapon(target)
-        if was_agent:
+        if was_rig:
             _fill_clips(context)
         return {"FINISHED"}
 
@@ -901,6 +1146,7 @@ class CS2RIG_OT_apply_skin(bpy.types.Operator):
             self.report({"WARNING"}, f"Applied {job.kit.label}, without its {' and '.join(job.missing)}.")
         else:
             self.report({"INFO"}, f"Applied {job.kit.label}.")
+        _sync_sticker_controls(context)
         return {"FINISHED"}
 
     def _step(self, context, job: paint.FinishJob) -> bool:
@@ -979,15 +1225,119 @@ class CS2RIG_OT_remove_skin(bpy.types.Operator):
 
     @_reports_errors
     def execute(self, context):
-        paint.remove_skin(importer.find_weapon_target(context))
+        target = importer.find_weapon_target(context)
+        current = session.get() if stickers.applied_stickers(target) else None
+        paint.remove_skin(target, session=current)
+        _sync_sticker_controls(context)
         return {"FINISHED"}
 
 
-class CS2RIG_OT_apply_gloves(_AgentOperator):
+class CS2RIG_OT_apply_sticker(bpy.types.Operator):
+    bl_idname = "cs2rig.apply_sticker"
+    bl_label = "Apply Sticker"
+    bl_description = "Apply the chosen sticker onto the active weapon's selected slot"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not _stickers_by_search:
+            cls.poll_message_set(_NEEDS_REFRESH)
+            return False
+        target = importer.find_weapon_target(context)
+        return target is not None and bool(importer.weapon_key(target))
+
+    @_reports_errors
+    def execute(self, context):
+        wm = context.window_manager
+        chosen = wm.cs2rig_sticker.strip()
+        kit = _stickers_by_search.get(chosen) or _stickers_by_material.get(chosen)
+        if kit is None and chosen:
+            hits = stickers_mod.search_stickers(list(_stickers_by_search.values()), chosen, limit=1)
+            kit = hits[0] if hits else None
+        if kit is None:
+            _report_error(self, context, "Choose a sticker first.")
+            return {"CANCELLED"}
+        target = importer.find_weapon_target(context)
+        slot = int(wm.cs2rig_sticker_slot)
+        stickers.apply_sticker(session.get(), target, kit, slot, wear=wm.cs2rig_sticker_wear)
+        _sync_sticker_controls(context)
+        self.report({"INFO"}, f"Applied {kit.label} to Slot {slot + 1}.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_remove_sticker(bpy.types.Operator):
+    bl_idname = "cs2rig.remove_sticker"
+    bl_label = "Remove Sticker"
+    bl_description = "Remove the sticker from the selected slot"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        target = importer.find_weapon_target(context)
+        if target is None or not importer.weapon_key(target):
+            return False
+        slot = int(context.window_manager.cs2rig_sticker_slot)
+        return stickers.slot_sticker(target, slot) is not None
+
+    @_reports_errors
+    def execute(self, context):
+        target = importer.find_weapon_target(context)
+        slot = int(context.window_manager.cs2rig_sticker_slot)
+        stickers.remove_sticker(session.get(), target, slot)
+        _sync_sticker_controls(context)
+        self.report({"INFO"}, f"Removed sticker from Slot {slot + 1}.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_clear_stickers(bpy.types.Operator):
+    bl_idname = "cs2rig.clear_stickers"
+    bl_label = "Clear All"
+    bl_description = "Remove all stickers from the active weapon"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        target = importer.find_weapon_target(context)
+        return target is not None and bool(stickers.applied_stickers(target))
+
+    @_reports_errors
+    def execute(self, context):
+        target = importer.find_weapon_target(context)
+        stickers.clear_stickers(target)
+        _sync_sticker_controls(context)
+        self.report({"INFO"}, "Cleared all stickers.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_reset_sticker_transform(bpy.types.Operator):
+    bl_idname = "cs2rig.reset_sticker_transform"
+    bl_label = "Reset Placement"
+    bl_description = "Reset Offset, Scale and Rotation for the selected slot to the weapon's default"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        target = importer.find_weapon_target(context)
+        if target is None or not importer.weapon_key(target):
+            return False
+        slot = int(context.window_manager.cs2rig_sticker_slot)
+        return stickers.slot_sticker(target, slot) is not None
+
+    @_reports_errors
+    def execute(self, context):
+        target = importer.find_weapon_target(context)
+        slot = int(context.window_manager.cs2rig_sticker_slot)
+        stickers.reset_slot_transform(session.get(), target, slot)
+        _sync_sticker_controls(context)
+        self.report({"INFO"}, f"Reset Slot {slot + 1} placement.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_apply_gloves(_CharacterOperator):
     bl_idname = "cs2rig.apply_gloves"
     bl_label = "Apply Gloves"
     bl_description = (
-        "Put the chosen glove finish on the agent's hands, with the Glove Wear and Glove Seed above. "
+        "Put the chosen glove finish on the selected agent's or first-person rig's hands, with the Glove Wear and Glove Seed above. "
         "Made in the background the first time"
     )
 
@@ -1013,7 +1363,7 @@ class CS2RIG_OT_apply_gloves(_AgentOperator):
         if kit is None:
             _report_error(self, context, "Choose gloves first.")
             return None
-        armature = importer.find_agent_armature(context)
+        armature = importer.find_character_rig(context)
         _glove_job = gloves.GloveJob(session.get(), armature, kit, wm.cs2rig_glove_wear, wm.cs2rig_glove_seed)
         return _glove_job
 
@@ -1110,19 +1460,19 @@ def _forget_finish_job(*_args) -> None:
         _finish_job.cancel()
 
 
-class CS2RIG_OT_remove_gloves(_AgentOperator):
+class CS2RIG_OT_remove_gloves(_CharacterOperator):
     bl_idname = "cs2rig.remove_gloves"
     bl_label = "Remove Gloves"
-    bl_description = "Give the agent its default gloves back"
+    bl_description = "Give the agent or first-person rig its default gloves back"
 
     @classmethod
     def poll(cls, context):
-        armature = importer.find_agent_armature(context)
+        armature = importer.find_character_rig(context)
         return armature is not None and bool(gloves.worn_gloves(armature))
 
     @_reports_errors
     def execute(self, context):
-        gloves.remove_gloves(importer.find_agent_armature(context))
+        gloves.remove_gloves(importer.find_character_rig(context))
         return {"FINISHED"}
 
 
@@ -1503,6 +1853,8 @@ def _next_hint(context, armature: bpy.types.Object | None, standalone: bpy.types
     action = armature.animation_data.action if armature.animation_data else None
     if action is None or not action.get(importer.CLIP_KEY_PROP):
         return "Next: choose a clip and press Load Clip."
+    if importer.is_viewmodel_arms(armature):
+        return "Next: adjust POV Camera, or add a map."
     if not rig.has_rig(armature):
         return "Next: add pose controls, or add a map."
     if maps.maps_in_scene(context.scene):
@@ -1539,6 +1891,13 @@ def _weapon_header(target: bpy.types.Object | None) -> str:
     settings = paint.worn_skin_settings(target)
     kit = _kits.get(settings[0]) if settings is not None else None
     return f"{_weapon_title(weapon)} · {kit.label}" if kit is not None else _weapon_title(weapon)
+
+
+def _stickers_header(target: bpy.types.Object | None) -> str:
+    applied = stickers.applied_stickers(target) if target is not None else []
+    if not applied:
+        return "None"
+    return "1 sticker" if len(applied) == 1 else f"{len(applied)} stickers"
 
 
 def _gloves_header(armature: bpy.types.Object) -> str:
@@ -1623,13 +1982,26 @@ def _section(layout, idname: str, title: str, summary: str = "", *, default_clos
     return body
 
 
+def _pov_header(armature: bpy.types.Object) -> str:
+    preset, fov, *_ = viewmodel.read_pov_settings(armature)
+    label = vm_core.get_preset(preset).label
+    return f"{label} · {fov:g}°"
+
+
 def _draw_agent(layout, context, armature: bpy.types.Object | None) -> None:
-    body = _section(layout, "cs2rig_agent", "Agent", _agent_title(armature) if armature is not None else "None")
+    if armature is not None and importer.is_viewmodel_arms(armature):
+        summary = f"FP · {_agent_title(armature)}"
+    elif armature is not None:
+        summary = _agent_title(armature)
+    else:
+        summary = "None"
+    body = _section(layout, "cs2rig_agent", "Agent", summary)
     if body is None:
         return
     body.use_property_split = True
     body.prop(context.window_manager, "cs2rig_agent")
     body.operator("cs2rig.import_agent", icon="ARMATURE_DATA")
+    body.operator("cs2rig.import_viewmodel", icon="VIEW_CAMERA")
     if not _agent_items:
         body.label(text="Read the game files first.", icon="INFO")
     elif armature is None:
@@ -1647,9 +2019,9 @@ def _draw_weapon(
     body.use_property_split = True
     wm = context.window_manager
     body.prop(wm, "cs2rig_weapon")
-    acting_on_agent = target is not None and importer.is_agent(target)
+    acting_on_rig = target is not None and importer.is_character_rig(target)
     row = body.row(align=True)
-    if acting_on_agent:
+    if acting_on_rig:
         row.operator("cs2rig.attach_weapon", icon="ADD")
         row.operator("cs2rig.remove_weapon", text="", icon="X")
         body.operator("cs2rig.import_weapon", text="Import Standalone", icon="IMPORT")
@@ -1657,7 +2029,7 @@ def _draw_weapon(
         row.operator("cs2rig.import_weapon", icon="IMPORT")
         row.operator("cs2rig.remove_weapon", text="", icon="X")
     if target is None or not importer.weapon_key(target):
-        if acting_on_agent:
+        if acting_on_rig:
             body.label(text="No weapon held.", icon="INFO")
         elif any(importer.is_standalone_weapon(obj) for obj in context.scene.objects):
             body.label(text="Select an imported weapon.", icon="INFO")
@@ -1677,6 +2049,31 @@ def _draw_weapon(
     applied = _applied_line(target)
     if applied:
         body.label(text=applied, icon="CHECKMARK")
+
+
+def _draw_stickers(layout, context, target: bpy.types.Object) -> None:
+    body = _section(layout, "cs2rig_stickers", "Stickers", _stickers_header(target), default_closed=True)
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_sticker_slot")
+    body.prop_search(wm, "cs2rig_sticker", wm, "cs2rig_stickers", text="Sticker", icon="IMAGE_DATA")
+    row = body.row(align=True)
+    row.operator("cs2rig.apply_sticker", icon="ADD")
+    row.operator("cs2rig.remove_sticker", text="", icon="X")
+    slot = int(wm.cs2rig_sticker_slot)
+    active = stickers.slot_sticker(target, slot)
+    if active is not None:
+        body.label(text=f"Slot {slot + 1}: {active.label or active.material}", icon="CHECKMARK")
+        body.prop(wm, "cs2rig_sticker_wear", slider=True)
+        body.prop(wm, "cs2rig_sticker_offset_x")
+        body.prop(wm, "cs2rig_sticker_offset_y")
+        body.prop(wm, "cs2rig_sticker_scale")
+        body.prop(wm, "cs2rig_sticker_rotation")
+        body.operator("cs2rig.reset_sticker_transform", icon="LOOP_BACK")
+    if stickers.applied_stickers(target):
+        body.operator("cs2rig.clear_stickers", icon="TRASH")
 
 
 def _draw_gloves(layout, context, armature: bpy.types.Object) -> None:
@@ -1711,6 +2108,20 @@ def _draw_animation(layout, context, armature: bpy.types.Object) -> None:
     row = body.row(align=True)
     row.operator("cs2rig.load_clip", icon="PLAY")
     row.operator("cs2rig.browse_clips", icon="VIEWZOOM")
+
+
+def _draw_pov(layout, context, armature: bpy.types.Object) -> None:
+    body = _section(layout, "cs2rig_pov", "POV Camera", _pov_header(armature))
+    if body is None:
+        return
+    body.use_property_split = True
+    wm = context.window_manager
+    body.prop(wm, "cs2rig_pov_preset")
+    body.prop(wm, "cs2rig_pov_fov", slider=True)
+    body.prop(wm, "cs2rig_pov_offset_x", slider=True)
+    body.prop(wm, "cs2rig_pov_offset_y", slider=True)
+    body.prop(wm, "cs2rig_pov_offset_z", slider=True)
+    body.operator("cs2rig.look_through_pov", icon="CAMERA_DATA")
 
 
 def _draw_pose(layout, context, armature: bpy.types.Object) -> None:
@@ -1848,11 +2259,14 @@ class CS2RIG_PT_main(bpy.types.Panel):
             col.scale_y = 1.4
             col.operator("cs2rig.refresh", icon="FILE_REFRESH")
             layout.label(text="About 30 seconds the first time.", icon="TIME")
-        armature = _agent(context)
+        armature = importer.find_character_rig(context)
+        is_fp = armature is not None and importer.is_viewmodel_arms(armature)
         weapon_target = _weapon_target(context)
         standalone = weapon_target if weapon_target is not None and importer.is_standalone_weapon(weapon_target) else None
         if standalone is not None:
             layout.label(text=f"Acting on {_standalone_title(standalone)}", icon="OBJECT_DATA")
+        elif is_fp:
+            layout.label(text=f"Acting on First-Person · {_agent_title(armature)}", icon="VIEW_CAMERA")
         elif armature is not None:
             layout.label(text=f"Acting on {_agent_title(armature)}", icon="ARMATURE_DATA")
         layout.label(text=_next_hint(context, armature, standalone), icon="INFO")
@@ -1865,10 +2279,15 @@ class CS2RIG_PT_main(bpy.types.Panel):
             return
         _draw_agent(layout, context, armature)
         _draw_weapon(layout, context, weapon_target)
+        if weapon_target is not None and importer.weapon_key(weapon_target):
+            _draw_stickers(layout, context, weapon_target)
         if armature is not None:
             _draw_gloves(layout, context, armature)
             _draw_animation(layout, context, armature)
-            _draw_pose(layout, context, armature)
+            if is_fp:
+                _draw_pov(layout, context, armature)
+            else:
+                _draw_pose(layout, context, armature)
         _draw_map(layout, context)
         _draw_studio(layout, context)
         _draw_tools(layout, context)
@@ -1877,6 +2296,7 @@ class CS2RIG_PT_main(bpy.types.Panel):
 _classes = (
     CS2RIG_Preferences,
     CS2RIG_ClipName,
+    CS2RIG_StickerName,
     CS2RIG_OT_download_converter,
     CS2RIG_OT_check_update,
     CS2RIG_OT_install_update,
@@ -1885,6 +2305,8 @@ _classes = (
     CS2RIG_OT_clear_cache,
     CS2RIG_OT_refresh,
     CS2RIG_OT_import_agent,
+    CS2RIG_OT_import_viewmodel,
+    CS2RIG_OT_look_through_pov,
     CS2RIG_OT_fix_eyes,
     CS2RIG_OT_load_clip,
     CS2RIG_OT_build_clip_previews,
@@ -1897,6 +2319,10 @@ _classes = (
     CS2RIG_OT_remove_weapon,
     CS2RIG_OT_apply_skin,
     CS2RIG_OT_remove_skin,
+    CS2RIG_OT_apply_sticker,
+    CS2RIG_OT_remove_sticker,
+    CS2RIG_OT_clear_stickers,
+    CS2RIG_OT_reset_sticker_transform,
     CS2RIG_OT_apply_gloves,
     CS2RIG_OT_remove_gloves,
     CS2RIG_OT_build_rig,
@@ -1949,6 +2375,66 @@ def register():
         max=1000,
         default=0,
     )
+    wm.cs2rig_stickers = CollectionProperty(type=CS2RIG_StickerName)
+    wm.cs2rig_sticker_slot = EnumProperty(
+        name="Slot",
+        description="Weapon sticker slot (1 to 5)",
+        items=_sticker_slot_items,
+        default="0",
+        update=_on_sticker_slot_changed,
+    )
+    wm.cs2rig_sticker = StringProperty(
+        name="Sticker",
+        description="Search and choose a weapon sticker to apply to the selected slot",
+    )
+    wm.cs2rig_sticker_wear = FloatProperty(
+        name="Scrape",
+        description="How scraped the sticker is, from 0 (fresh) to 1 (heavily scraped). Updates live",
+        min=0.0,
+        max=1.0,
+        default=0.0,
+        update=_on_sticker_param_changed,
+    )
+    wm.cs2rig_sticker_offset_x = FloatProperty(
+        name="Offset X",
+        description="Horizontal placement offset in sticker UV space. Updates live",
+        min=-0.5,
+        max=0.5,
+        default=0.0,
+        step=0.5,
+        precision=3,
+        update=_on_sticker_param_changed,
+    )
+    wm.cs2rig_sticker_offset_y = FloatProperty(
+        name="Offset Y",
+        description="Vertical placement offset in sticker UV space. Updates live",
+        min=-0.5,
+        max=0.5,
+        default=-0.4,
+        step=0.5,
+        precision=3,
+        update=_on_sticker_param_changed,
+    )
+    wm.cs2rig_sticker_scale = FloatProperty(
+        name="Scale",
+        description="Inverse sticker size in sticker UV space (smaller value = larger sticker). Updates live",
+        min=1.0,
+        max=40.0,
+        default=14.1,
+        step=10.0,
+        precision=2,
+        update=_on_sticker_param_changed,
+    )
+    wm.cs2rig_sticker_rotation = FloatProperty(
+        name="Rotation",
+        description="Sticker rotation in degrees. Updates live",
+        min=-180.0,
+        max=180.0,
+        default=0.0,
+        step=100.0,
+        precision=1,
+        update=_on_sticker_param_changed,
+    )
     wm.cs2rig_glove = EnumProperty(name="Gloves", description="The glove finish to put on the selected agent's hands", items=_glove_enum)
     wm.cs2rig_glove_wear = FloatProperty(
         name="Glove Wear",
@@ -1996,6 +2482,59 @@ def register():
         default=True,
         update=_on_studio_setting_changed,
     )
+    wm.cs2rig_pov_preset = EnumProperty(
+        name="Preset",
+        description="CS2 viewmodel camera preset",
+        items=_pov_preset_items,
+        default="classic",
+        update=_on_pov_preset_changed,
+    )
+    wm.cs2rig_pov_fov = FloatProperty(
+        name="Viewmodel FOV",
+        description="Source 2 4:3 Hor+ viewmodel_fov (54 to 68 degrees)",
+        min=vm_core.FOV_MIN,
+        max=vm_core.FOV_MAX,
+        default=vm_core.DEFAULT_FOV,
+        step=10,
+        precision=1,
+        update=_on_pov_slider_changed,
+    )
+    wm.cs2rig_pov_offset_x = FloatProperty(
+        name="Offset X",
+        description="viewmodel_offset_x in inches (positive moves right)",
+        min=-5.0,
+        max=5.0,
+        soft_min=-2.0,
+        soft_max=2.5,
+        default=2.5,
+        step=10,
+        precision=2,
+        update=_on_pov_slider_changed,
+    )
+    wm.cs2rig_pov_offset_y = FloatProperty(
+        name="Offset Y",
+        description="viewmodel_offset_y in inches (positive moves forward)",
+        min=-5.0,
+        max=5.0,
+        soft_min=-2.0,
+        soft_max=2.0,
+        default=0.0,
+        step=10,
+        precision=2,
+        update=_on_pov_slider_changed,
+    )
+    wm.cs2rig_pov_offset_z = FloatProperty(
+        name="Offset Z",
+        description="viewmodel_offset_z in inches (positive moves up)",
+        min=-5.0,
+        max=5.0,
+        soft_min=-2.0,
+        soft_max=2.0,
+        default=-1.5,
+        step=10,
+        precision=2,
+        update=_on_pov_slider_changed,
+    )
     wm.cs2rig_error = StringProperty(name="Last Error")
 
 
@@ -2014,7 +2553,38 @@ def unregister():
         atexit.unregister(_cancel_jobs)
         _exit_hooked = False
     wm = bpy.types.WindowManager
-    for name in ("cs2rig_error", "cs2rig_studio_backdrop", "cs2rig_studio_preset", "cs2rig_glove_seed", "cs2rig_glove_wear", "cs2rig_glove", "cs2rig_seed", "cs2rig_wear", "cs2rig_skin", "cs2rig_match_clips", "cs2rig_clip", "cs2rig_clips", "cs2rig_map_sky", "cs2rig_map_link", "cs2rig_map", "cs2rig_weapon", "cs2rig_agent"):
+    for name in (
+        "cs2rig_error",
+        "cs2rig_pov_offset_z",
+        "cs2rig_pov_offset_y",
+        "cs2rig_pov_offset_x",
+        "cs2rig_pov_fov",
+        "cs2rig_pov_preset",
+        "cs2rig_studio_backdrop",
+        "cs2rig_studio_preset",
+        "cs2rig_glove_seed",
+        "cs2rig_glove_wear",
+        "cs2rig_glove",
+        "cs2rig_sticker_rotation",
+        "cs2rig_sticker_scale",
+        "cs2rig_sticker_offset_y",
+        "cs2rig_sticker_offset_x",
+        "cs2rig_sticker_wear",
+        "cs2rig_sticker",
+        "cs2rig_sticker_slot",
+        "cs2rig_stickers",
+        "cs2rig_seed",
+        "cs2rig_wear",
+        "cs2rig_skin",
+        "cs2rig_match_clips",
+        "cs2rig_clip",
+        "cs2rig_clips",
+        "cs2rig_map_sky",
+        "cs2rig_map_link",
+        "cs2rig_map",
+        "cs2rig_weapon",
+        "cs2rig_agent",
+    ):
         delattr(wm, name)
     for cls in reversed(_classes):
         bpy.utils.unregister_class(cls)

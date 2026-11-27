@@ -10,10 +10,12 @@ from dataclasses import dataclass, field
 from pathlib import Path
 
 from . import clipdata
+from . import viewmodel as vm_mod
 from .catalog import CLIP_PREFIX
 
 # World clip folders in the order the tree lists them.
 WORLD_FAMILIES = ("rifle", "knife", "pistol", "shared", "equipment", "grenade")
+VIEWMODEL_FAMILIES = vm_mod.VIEWMODEL_FAMILIES
 MENU_GROUP = "ui_anims"
 # Top folders whose clips target another skeleton, with the reason shown for them.
 NOT_FOR_AGENTS = {
@@ -21,7 +23,14 @@ NOT_FOR_AGENTS = {
     "chicken": ("Chicken", "Made for the chicken's skeleton"),
     "egg": ("Egg", "Made for the chicken egg"),
 }
+NOT_FOR_VIEWMODEL = {
+    "world": ("World (third-person)", "Made for a third-person agent, not first-person arms"),
+    "ui_anims": ("Menu poses", "Made for a third-person agent, not first-person arms"),
+    "chicken": ("Chicken", "Made for the chicken's skeleton"),
+    "egg": ("Egg", "Made for the chicken egg"),
+}
 OTHER_REASON = "Not a third-person agent clip"
+OTHER_VIEWMODEL_REASON = "Not a first-person arms clip"
 
 ALL_NODE = "all"
 UNUSABLE_NODE = "not_for_agents"
@@ -89,6 +98,20 @@ class Clip:
             return ""
         return NOT_FOR_AGENTS.get(self.group, ("", OTHER_REASON))[1]
 
+    def usable_for(self, mode: str = "world") -> bool:
+        if mode == "viewmodel":
+            return vm_mod.is_viewmodel_arm_clip(self.path)
+        return self.usable
+
+    def reason_for(self, mode: str = "world") -> str:
+        if mode != "viewmodel":
+            return self.reason
+        if self.usable_for("viewmodel"):
+            return ""
+        if self.group == "viewmodel":
+            return "Made for a chicken or egg prop, not first-person arms"
+        return NOT_FOR_VIEWMODEL.get(self.group, ("", OTHER_VIEWMODEL_REASON))[1]
+
 
 @dataclass(frozen=True)
 class TreeNode:
@@ -97,23 +120,56 @@ class TreeNode:
     depth: int
     dimmed: bool = False
     reason: str = ""
+    mode: str = "world"
 
     def holds(self, clip: Clip) -> bool:
         if self.key == ALL_NODE:
-            return clip.usable
+            return clip.usable_for(self.mode)
         if self.key == UNUSABLE_NODE:
-            return not clip.usable
-        return clip.group == self.key or clip.category == self.key or (self.key == "other" and _is_other(clip))
+            return not clip.usable_for(self.mode)
+        if self.mode == "viewmodel" and self.key == "viewmodel":
+            return clip.usable_for("viewmodel")
+        if self.key == "other":
+            return _is_other(clip, self.mode)
+        return clip.group == self.key or clip.category == self.key
 
 
-def _is_other(clip: Clip) -> bool:
+def _is_other(clip: Clip, mode: str = "world") -> bool:
+    if mode == "viewmodel":
+        return not clip.usable_for("viewmodel") and clip.group not in NOT_FOR_VIEWMODEL
     return not clip.usable and clip.group not in NOT_FOR_AGENTS
 
 
-def build_tree(clips: list[Clip]) -> list[TreeNode]:
-    """World families first, then menu poses, then the dimmed groups no agent can play."""
+def build_tree(clips: list[Clip], mode: str = "world") -> list[TreeNode]:
+    """Build the category tree for either third-person ('world') or first-person ('viewmodel') rigs."""
     groups = {clip.group for clip in clips}
     categories = {clip.category for clip in clips}
+    if mode == "viewmodel":
+        nodes = [TreeNode(ALL_NODE, "All viewmodel clips", 0, mode="viewmodel")]
+        vm_clips = [c for c in clips if c.usable_for("viewmodel")]
+        vm_cats = {c.category for c in vm_clips}
+        if vm_clips:
+            nodes.append(TreeNode("viewmodel", "First-person", 0, mode="viewmodel"))
+            families = [f for f in VIEWMODEL_FAMILIES if f"viewmodel/{f}" in vm_cats]
+            families += sorted(
+                c.split("/")[1]
+                for c in vm_cats
+                if c.startswith("viewmodel/") and c.split("/")[1] not in VIEWMODEL_FAMILIES
+            )
+            nodes += [TreeNode(f"viewmodel/{family}", folder_title(family), 1, mode="viewmodel") for family in families]
+        unusable = [g for g in NOT_FOR_VIEWMODEL if g in groups]
+        has_other = any(_is_other(clip, "viewmodel") for clip in clips)
+        if unusable or has_other:
+            nodes.append(
+                TreeNode(UNUSABLE_NODE, "Not for first-person", 0, dimmed=True, reason="These clips target another skeleton", mode="viewmodel")
+            )
+            for group in unusable:
+                label, reason = NOT_FOR_VIEWMODEL[group]
+                nodes.append(TreeNode(group, label, 1, dimmed=True, reason=reason, mode="viewmodel"))
+            if has_other:
+                nodes.append(TreeNode("other", "Other", 1, dimmed=True, reason=OTHER_VIEWMODEL_REASON, mode="viewmodel"))
+        return nodes
+
     nodes = [TreeNode(ALL_NODE, "All clips", 0)]
     if "world" in groups:
         nodes.append(TreeNode("world", "World", 0))
@@ -164,11 +220,12 @@ def weapon_folder_score(clip: Clip, weapon_key: str) -> int:
     return best
 
 
-def held_folder(clips: list[Clip], family: str, weapon_key: str) -> str:
+def held_folder(clips: list[Clip], family: str, weapon_key: str, mode: str = "world") -> str:
     """The folder of clips made for the held weapon, e.g. 'rifle_ak'; empty when it has none."""
+    prefix = "viewmodel" if mode == "viewmodel" else "world"
     best, best_score = "", 0
     for clip in clips:
-        if clip.category != f"world/{family}":
+        if clip.category != f"{prefix}/{family}":
             continue
         score = weapon_folder_score(clip, weapon_key)
         if score > best_score:
@@ -184,8 +241,12 @@ def _order(clip: Clip) -> tuple:
         return (0, rank)
     if clip.group == MENU_GROUP:
         return (1, 0)
+    if clip.group == "viewmodel":
+        family = clip.parts[1] if len(clip.parts) > 2 else ""
+        rank = VIEWMODEL_FAMILIES.index(family) if family in VIEWMODEL_FAMILIES else len(VIEWMODEL_FAMILIES)
+        return (2, rank)
     groups = list(NOT_FOR_AGENTS)
-    return (2, groups.index(clip.group) if clip.group in groups else len(groups))
+    return (3, groups.index(clip.group) if clip.group in groups else len(groups))
 
 
 def clips_in(clips: list[Clip], node: TreeNode, query: str, first_folder: str = "") -> list[Clip]:
@@ -200,11 +261,12 @@ def counts(clips: list[Clip], tree: list[TreeNode], query: str) -> list[int]:
     return [sum(1 for clip in found if node.holds(clip)) for node in tree]
 
 
-def default_node(tree: list[TreeNode], family: str) -> int:
+def default_node(tree: list[TreeNode], family: str, mode: str = "world") -> int:
     """Open on the held weapon's family when the panel filters by it, otherwise on every clip."""
+    prefix = "viewmodel" if mode == "viewmodel" else "world"
     keys = [node.key for node in tree]
-    if family and f"world/{family}" in keys:
-        return keys.index(f"world/{family}")
+    if family and f"{prefix}/{family}" in keys:
+        return keys.index(f"{prefix}/{family}")
     return 0
 
 

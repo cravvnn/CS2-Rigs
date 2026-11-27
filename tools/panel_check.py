@@ -20,7 +20,7 @@ import cs2_rigs  # noqa: E402
 
 ICONS = set(bpy.types.UILayout.bl_rna.functions["label"].parameters["icon"].enum_items.keys())
 
-WEAR_PROPS = {"cs2rig_wear", "cs2rig_glove_wear"}
+WEAR_PROPS = {"cs2rig_wear", "cs2rig_glove_wear", "cs2rig_sticker_wear"}
 # Blender reports the identifier of these dynamic enums, not the label the dropdown shows.
 ENUM_ITEMS = {
     "cs2rig_agent": lambda: cs2_rigs._agent_items,
@@ -28,6 +28,7 @@ ENUM_ITEMS = {
     "cs2rig_skin": lambda: cs2_rigs._skin_enum(None, bpy.context),
     "cs2rig_glove": lambda: cs2_rigs._glove_items,
     "cs2rig_map": lambda: cs2_rigs._map_items,
+    "cs2rig_sticker_slot": lambda: cs2_rigs._sticker_slot_items,
 }
 
 
@@ -345,12 +346,18 @@ LABELS = {
     cs2_rigs.CS2RIG_OT_fix_eyes: "Rebuild Eye Materials",
     cs2_rigs.CS2RIG_OT_build_clip_previews: "Build Clip Thumbnails",
     cs2_rigs.CS2RIG_OT_import_weapon: "Import Weapon",
+    cs2_rigs.CS2RIG_OT_import_viewmodel: "Import First-Person",
+    cs2_rigs.CS2RIG_OT_look_through_pov: "Look Through POV Camera",
     cs2_rigs.CS2RIG_OT_build_rig: "Add Pose Controls",
     cs2_rigs.CS2RIG_OT_remove_rig: "Remove Pose Controls",
     cs2_rigs.CS2RIG_OT_add_studio: "Add Studio",
     cs2_rigs.CS2RIG_OT_remove_studio: "Remove Studio",
     cs2_rigs.CS2RIG_OT_frame_studio: "Frame Subject",
     cs2_rigs.CS2RIG_OT_toggle_turntable: "Turntable",
+    cs2_rigs.CS2RIG_OT_apply_sticker: "Apply Sticker",
+    cs2_rigs.CS2RIG_OT_remove_sticker: "Remove Sticker",
+    cs2_rigs.CS2RIG_OT_clear_stickers: "Clear All",
+    cs2_rigs.CS2RIG_OT_reset_sticker_transform: "Reset Placement",
 }
 for operator, label in LABELS.items():
     assert operator.bl_label == label, (operator.bl_idname, operator.bl_label)
@@ -370,6 +377,18 @@ PROPERTY_NAMES = {
     "cs2rig_clip": "Clip",
     "cs2rig_studio_preset": "Lighting",
     "cs2rig_studio_backdrop": "Backdrop",
+    "cs2rig_pov_preset": "Preset",
+    "cs2rig_pov_fov": "Viewmodel FOV",
+    "cs2rig_pov_offset_x": "Offset X",
+    "cs2rig_pov_offset_y": "Offset Y",
+    "cs2rig_pov_offset_z": "Offset Z",
+    "cs2rig_sticker_slot": "Slot",
+    "cs2rig_sticker": "Sticker",
+    "cs2rig_sticker_wear": "Scrape",
+    "cs2rig_sticker_offset_x": "Offset X",
+    "cs2rig_sticker_offset_y": "Offset Y",
+    "cs2rig_sticker_scale": "Scale",
+    "cs2rig_sticker_rotation": "Rotation",
 }
 for name, label in PROPERTY_NAMES.items():
     assert bpy.types.WindowManager.bl_rna.properties[name].name == label, (name, bpy.types.WindowManager.bl_rna.properties[name].name)
@@ -402,11 +421,17 @@ assert "Next: import an agent or a weapon." in no_agent["texts"]
 wm.cs2rig_weapon = "ak47"
 assert bpy.ops.cs2rig.import_weapon() == {"FINISHED"}
 solo_stock = draw("standalone weapon, stock", context)
-assert {"Agent", "Weapon", "Map", "Studio", "Tools"} == set(visible_sections(solo_stock)), visible_sections(solo_stock)
+assert {"Agent", "Weapon", "Stickers", "Map", "Studio", "Tools"} == set(visible_sections(solo_stock)), visible_sections(solo_stock)
 assert "Acting on AK-47" in solo_stock["texts"], solo_stock["texts"]
 assert "Next: choose a finish and press Apply Finish." in solo_stock["texts"], solo_stock["texts"]
-assert {"cs2rig.import_weapon", "cs2rig.remove_weapon", "cs2rig.apply_skin", "cs2rig.remove_skin"} <= set(solo_stock["operators"])
-assert {"cs2rig_skin", "cs2rig_wear", "cs2rig_seed"} <= set(solo_stock["names"])
+assert {"cs2rig.import_weapon", "cs2rig.remove_weapon", "cs2rig.apply_skin", "cs2rig.remove_skin", "cs2rig.apply_sticker", "cs2rig.remove_sticker"} <= set(solo_stock["operators"])
+assert {"cs2rig_skin", "cs2rig_wear", "cs2rig_seed", "cs2rig_sticker_slot", "cs2rig_sticker"} <= set(solo_stock["names"])
+wm.cs2rig_sticker_slot = "0"
+wm.cs2rig_sticker = "Crown (Foil)"
+assert bpy.ops.cs2rig.apply_sticker() == {"FINISHED"}
+solo_sticker = draw("standalone weapon, sticker applied", context)
+assert {"cs2rig_sticker_wear", "cs2rig_sticker_offset_x", "cs2rig_sticker_offset_y", "cs2rig_sticker_scale", "cs2rig_sticker_rotation"} <= set(solo_sticker["names"])
+assert {"cs2rig.reset_sticker_transform", "cs2rig.clear_stickers"} <= set(solo_sticker["operators"])
 wm.cs2rig_skin = "gs_ak47_bloodsport"
 wm.cs2rig_wear, wm.cs2rig_seed = 0.15, 42
 assert bpy.ops.cs2rig.apply_skin() == {"FINISHED"}
@@ -414,16 +439,43 @@ solo_painted = draw("standalone weapon, painted", context)
 assert "Applied: Bloodsport · wear 0.15 · seed 42" in solo_painted["texts"], solo_painted["texts"]
 solo_closed = draw("standalone weapon, collapsed", context, all_closed=True)
 assert solo_closed["sections"]["cs2rig_weapon"]["header_texts"] == ["Weapon", "AK-47 · Bloodsport"]
+assert solo_closed["sections"]["cs2rig_stickers"]["header_texts"] == ["Stickers", "1 sticker"]
+assert bpy.ops.cs2rig.clear_stickers() == {"FINISHED"}
 assert bpy.ops.cs2rig.remove_skin() == {"FINISHED"}
 assert bpy.ops.cs2rig.remove_weapon() == {"FINISHED"}
 
+# First-Person arms workflow (POV Camera replaces Pose Controls, viewmodel clips offered).
+wm.cs2rig_agent = "ctm_sas/ctm_sas"
+assert bpy.ops.cs2rig.import_viewmodel() == {"FINISHED"}
+fp_empty = draw("first-person arms, no weapon", context)
+assert {"Agent", "Weapon", "Gloves", "Animation", "POV Camera", "Map", "Studio", "Tools"} == set(visible_sections(fp_empty)), visible_sections(fp_empty)
+assert "Pose Controls" not in visible_sections(fp_empty)
+assert "cs2rig.look_through_pov" in fp_empty["operators"]
+for expected in ("cs2rig_pov_preset", "cs2rig_pov_fov", "cs2rig_pov_offset_x", "cs2rig_pov_offset_y", "cs2rig_pov_offset_z"):
+    assert expected in fp_empty["names"], f"the panel did not draw {expected}"
+wm.cs2rig_weapon = "ak47"
+assert bpy.ops.cs2rig.attach_weapon() == {"FINISHED"}
+assert any(item.name.startswith("viewmodel/rifle/rifle_ak/") for item in wm.cs2rig_clips), "viewmodel clips not listed"
+wm.cs2rig_clip = "viewmodel/rifle/rifle_ak/idle_ak"
+assert bpy.ops.cs2rig.load_clip() == {"FINISHED"}
+wm.cs2rig_pov_preset = "desktop"
+fp_closed = draw("first-person arms, collapsed", context, all_closed=True)
+assert fp_closed["sections"]["cs2rig_pov"]["header_texts"] == ["POV Camera", "Desktop · 60°"], fp_closed["sections"]["cs2rig_pov"]
+# Clean up the FP rig before drawing the third-person full state.
+fp_arms = cs2_rigs.importer.find_viewmodel_arms(context)
+fp_root = fp_arms.parent if fp_arms is not None else None
+to_remove = [fp_root, *fp_root.children_recursive] if fp_root is not None else [fp_arms, *fp_arms.children_recursive]
+bpy.data.batch_remove([o for o in to_remove if o is not None])
+wm.cs2rig_pov_preset = "classic"
+
 draw_full(context)
 full = draw("agent, weapon, finish, gloves, controls and map", context)
-assert {"Agent", "Weapon", "Gloves", "Animation", "Pose Controls", "Map", "Studio", "Tools"} == set(visible_sections(full)), visible_sections(full)
+assert {"Agent", "Weapon", "Stickers", "Gloves", "Animation", "Pose Controls", "Map", "Studio", "Tools"} == set(visible_sections(full)), visible_sections(full)
 # Open headers show only the section title (no summary clutter).
 for sec_id, expected_title in (
     ("cs2rig_agent", "Agent"),
     ("cs2rig_weapon", "Weapon"),
+    ("cs2rig_stickers", "Stickers"),
     ("cs2rig_gloves", "Gloves"),
     ("cs2rig_animation", "Animation"),
     ("cs2rig_pose", "Pose Controls"),
@@ -481,6 +533,7 @@ for expected in (
 closed = draw("all sections closed", context, all_closed=True)
 assert closed["sections"]["cs2rig_agent"]["header_texts"] == ["Agent", "Cmdr. Davida 'Goggles' Fernandez (CT)"]
 assert closed["sections"]["cs2rig_weapon"]["header_texts"] == ["Weapon", "AK-47 · Bloodsport"]
+assert closed["sections"]["cs2rig_stickers"]["header_texts"] == ["Stickers", "None"]
 assert closed["sections"]["cs2rig_gloves"]["header_texts"] == ["Gloves", "Driver Gloves | Crimson Weave"]
 assert closed["sections"]["cs2rig_animation"]["header_texts"] == ["Animation", "run_n_rifle"]
 assert closed["sections"]["cs2rig_pose"]["header_texts"] == ["Pose Controls", "On"]

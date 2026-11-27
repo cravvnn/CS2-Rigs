@@ -28,21 +28,26 @@ GLOVE_PROP = "cs2rig_gloves"  # on the glove mesh: the finish it wears
 WEAR_PROP = "cs2rig_gloves_wear"
 SEED_PROP = "cs2rig_gloves_seed"
 DEFAULT_GLOVES = importer.DEFAULT_GLOVES_PART  # the agent's own mesh for its hands
+FP_DEFAULT_GLOVES = "firstperson_default_gloves"
 MESH_PART = "worldmodel"  # the third-person mesh of a glove model
+FP_MESH_PART = "viewmodel"  # the high-poly first-person mesh of a glove model
 TEXTURE_SIZE = 2048
 EXPORT_WORKERS = 4  # textures converted at once; the converter's staging is per process and thread
 SHEEN_NODE = "CS2Rig Sheen"  # the image node that feeds the cloth sheen
 
 
 def _default_gloves(armature: bpy.types.Object) -> bpy.types.Object | None:
-    """The agent's own gloves mesh, which a glove finish replaces.
+    """The agent's or first-person rig's own gloves mesh, which a glove finish replaces.
 
-    Files imported by 0.3.0 carry a role property, so renaming the mesh does not
+    Files imported by 0.3.0+ carry a role property, so renaming the mesh does not
     lose it; older files are matched by their importer-given name.
     """
     meshes = [obj for obj in armature.children_recursive if obj.type == "MESH"]
     stamped = next((obj for obj in meshes if obj.get(importer.ROLE_PROP) == importer.DEFAULT_GLOVES_ROLE), None)
-    return stamped or next((obj for obj in meshes if DEFAULT_GLOVES in obj.name), None)
+    if stamped is not None:
+        return stamped
+    marker = FP_DEFAULT_GLOVES if importer.is_viewmodel_arms(armature) else DEFAULT_GLOVES
+    return next((obj for obj in meshes if marker in obj.name), None)
 
 
 def _glove_meshes(armature: bpy.types.Object) -> list[bpy.types.Object]:
@@ -94,22 +99,25 @@ def _export_model(session: Session, kit: skins_mod.PaintKit) -> Path:
 
 
 def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object) -> bpy.types.Object:
-    """Import the glove model and keep only its third-person mesh, put on the agent's skeleton."""
+    """Import the glove model and keep its worldmodel or viewmodel mesh, put on the rig's skeleton."""
+    fp = importer.is_viewmodel_arms(armature)
+    mesh_part = FP_MESH_PART if fp else MESH_PART
     actions_before = set(bpy.data.actions)
     objects = importer._import_glb(context, glb)
     for action in [a for a in bpy.data.actions if a not in actions_before]:
         bpy.data.actions.remove(action)
-    mesh = next((obj for obj in objects if obj.type == "MESH" and MESH_PART in obj.name), None)
+    mesh = next((obj for obj in objects if obj.type == "MESH" and mesh_part in obj.name), None)
     if mesh is None:
         bpy.data.batch_remove(objects)
-        raise RuntimeError(f"{glb.name} has no third-person glove mesh.")
+        kind = "first-person" if fp else "third-person"
+        raise RuntimeError(f"{glb.name} has no {kind} glove mesh.")
     datas = {obj.data for obj in objects if obj is not mesh}
     bpy.data.batch_remove([obj for obj in objects if obj is not mesh])
     for data in datas:
         if data.users == 0 and isinstance(data, (bpy.types.Mesh, bpy.types.Armature)):
             (bpy.data.meshes if isinstance(data, bpy.types.Mesh) else bpy.data.armatures).remove(data)
 
-    # The glove skeleton is the agent's own bones under the same names, so the weights carry over.
+    # The glove skeleton shares the arm bones under the same names, so the weights carry over.
     for old in list(mesh.users_collection):
         old.objects.unlink(mesh)
     (armature.users_collection or [context.scene.collection])[0].objects.link(mesh)
@@ -118,7 +126,8 @@ def _bring_in(context: bpy.types.Context, glb: Path, armature: bpy.types.Object)
     for modifier in mesh.modifiers:
         if modifier.type == "ARMATURE":
             modifier.object = armature
-    mesh.name = f"{armature.name.removesuffix('.skeleton')}.gloves"
+    prefix = armature.name.removesuffix(".fp_skeleton").removesuffix(".skeleton")
+    mesh.name = f"{prefix}.gloves"
     mesh[importer.ROLE_PROP] = importer.GLOVE_ROLE
     return mesh
 
@@ -344,15 +353,14 @@ def _set_sheen(material: bpy.types.Material, path) -> None:
 
 
 def _put_on(context: bpy.types.Context, session: Session, armature: bpy.types.Object, kit: skins_mod.PaintKit, glb: Path, wear: float, seed: int) -> None:
-    """Swap the agent's gloves for the glove model wearing the composed finish."""
+    """Swap the agent's or first-person rig's gloves for the glove model wearing the composed finish."""
     default = _default_gloves(armature)
     if default is None:
-        raise RuntimeError("This agent has no gloves mesh to replace.")
+        raise RuntimeError("This rig has no gloves mesh to replace.")
     remove_gloves(armature)
     mesh = _bring_in(context, glb, armature)
     mesh[GLOVE_PROP] = kit.name
     try:
-        # The bare forearm that comes with some gloves keeps its own look.
         hands = {
             slot.material: gloves_mod.is_left(name)
             for slot in mesh.material_slots
@@ -364,6 +372,19 @@ def _put_on(context: bpy.types.Context, session: Session, armature: bpy.types.Ob
             if sheen.is_file():
                 _set_sheen(material, sheen)
             material.name = f"{material.name}.{kit.name}"
+        if importer.is_viewmodel_arms(armature):
+            from . import viewmodel
+
+            if viewmodel.has_visible_sleeves(armature):
+                # Strip bare-arm faces under visible sleeves so elbows never poke through.
+                viewmodel.strip_bare_arm_faces(mesh)
+            else:
+                # Sleeveless agent: match the glove's bare forearm shell to the agent's skin tone.
+                skin_mat = viewmodel.bare_arm_material(armature)
+                if skin_mat is not None:
+                    for slot in mesh.material_slots:
+                        if slot.material is not None and "bare_arm" in paint._game_material(slot.material).lower():
+                            slot.material = skin_mat
     except Exception:
         remove_gloves(armature)
         raise

@@ -168,6 +168,10 @@ class Converter:
         """Everything the converter can print about one resource, as text."""
         return self._run(["-i", str(package), "-f", path, "-a"], timeout=300)
 
+    def dump_block(self, package: Path, path: str, block: str) -> str:
+        """One named block (such as DATA) of a compiled resource, as text."""
+        return self._run(["-i", str(package), "-f", path, "-b", block], timeout=300)
+
     def stream(self, args: list[str], timeout: float):
         """Run the converter and yield its output line by line, for dumps too large to hold."""
         flags = subprocess.CREATE_NO_WINDOW if sys.platform == "win32" else 0

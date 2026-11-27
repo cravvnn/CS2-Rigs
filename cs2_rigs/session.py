@@ -16,6 +16,8 @@ from .core import finish as finish_mod
 from .core import glb as glb_mod
 from .core import gloves as gloves_mod
 from .core import skins as skins_mod
+from .core import stickers as stickers_mod
+from .core import viewmodel as viewmodel_mod
 from .core.cache import Cache, default_cache_root
 from .core.converter import CLI_NAME, Converter, exported_path, find_cli
 from .core.steam import GameInstall, find_install
@@ -40,8 +42,10 @@ class Session:
     cache: Cache
     _catalog: dict | None = None
     _skins: list | None = None
+    _stickers: list | None = None
     _finishes: dict | None = None
     _materials: dict = field(default_factory=dict)
+    _sticker_markup: dict = field(default_factory=dict)
     _clip_info: dict = field(default_factory=dict)
     _listing: list | None = None
 
@@ -52,7 +56,7 @@ class Session:
         return self._listing
 
     def _done_with_listing(self) -> None:
-        if self._catalog is not None and self._skins is not None:
+        if self._catalog is not None and self._skins is not None and self._stickers is not None:
             self._listing = None  # the lists are built; the listing is large
 
     def catalog(self) -> dict:
@@ -72,6 +76,35 @@ class Session:
             self._done_with_listing()
         return self._skins
 
+    def stickers(self) -> list[stickers_mod.StickerKit]:
+        """Every weapon sticker in the game, excluding graffiti and agent patches."""
+        if self._stickers is None:
+            self._stickers = stickers_mod.load_or_build_catalogue(
+                self.converter, self.install.main_package, self.cache.stickers_file, self.entries
+            )
+            self._done_with_listing()
+        return self._stickers
+
+    def sticker_markup(self, model_path: str) -> dict[str, list[stickers_mod.StickerSlotDefault]]:
+        """Parsed StickerMarkup slot metadata for one weapon model, cached on disk."""
+        path = model_path.replace("\\", "/")
+        if not path.endswith("_c"):
+            path += "_c"
+        if path not in self._sticker_markup:
+            cached = stickers_mod.read_markup_cache(self.cache.sticker_markup_dir, path)
+            if cached is None:
+                try:
+                    dump = self.converter.dump_block(self.install.main_package, path, "DATA")
+                    cached = stickers_mod.parse_sticker_markup(dump)
+                except RuntimeError:
+                    cached = {}
+                try:
+                    stickers_mod.store_markup_cache(self.cache.sticker_markup_dir, path, cached)
+                except OSError:
+                    pass
+            self._sticker_markup[path] = cached
+        return self._sticker_markup[path]
+
     def finishes(self) -> dict:
         """Every finish's materials and recipes. Reading them takes a while the first time."""
         if self._finishes is None:
@@ -83,6 +116,7 @@ class Session:
         stored = (
             (self.cache.catalog_file, catalog_mod.CATALOG_VERSION),
             (self.cache.skins_file, skins_mod.CATALOGUE_VERSION),
+            (self.cache.stickers_file, stickers_mod.CATALOGUE_VERSION),
             (self.cache.finishes_file, finish_mod.LIBRARY_VERSION),
         )
         return all(_stored_version(path) == version for path, version in stored)
@@ -194,6 +228,30 @@ class Session:
         if model.is_file():
             return glb_mod.strip_to_skeleton(model, target)
         rig = self.export_model(weapon.model_path, out_dir, [WEAPON_RIG_CLIP], materials=False)
+        return glb_mod.strip_to_skeleton(rig, target)
+
+    def fp_model_export(self) -> Path:
+        """Convert the shared first-person arms model, or reuse the cached result."""
+        return self.export_model(
+            viewmodel_mod.WEAPON_ARMS_MODEL,
+            self.cache.model_dir("viewmodel/arms"),
+            [viewmodel_mod.WEAPON_ARMS_BASE_CLIP],
+            materials=True,
+        )
+
+    def fp_rig_export(self) -> Path:
+        """The first-person arms skeleton only, which viewmodel clips are put onto."""
+        out_dir = self.cache.clip_dir("viewmodel/arms", "rig")
+        target = out_dir / "skeleton.glb"
+        model = exported_path(self.cache.model_dir("viewmodel/arms"), viewmodel_mod.WEAPON_ARMS_MODEL)
+        if model.is_file():
+            return glb_mod.strip_to_skeleton(model, target)
+        rig = self.export_model(
+            viewmodel_mod.WEAPON_ARMS_MODEL,
+            out_dir,
+            [viewmodel_mod.WEAPON_ARMS_BASE_CLIP],
+            materials=False,
+        )
         return glb_mod.strip_to_skeleton(rig, target)
 
     def export_clip(self, clip: str) -> tuple[Path, bool]:

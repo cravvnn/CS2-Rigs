@@ -24,9 +24,13 @@ from .core.targets import (
     CLIP_KEY_PROP,
     COMPOSED_PROP,
     DEFAULT_GLOVES_ROLE,
+    FIRSTPERSON_ROOT_ROLE,
     GLOVE_ROLE,
     INSTANCE_PROP,
+    POV_CAMERA_ROLE,
     ROLE_PROP,
+    SLEEVES_ROLE,
+    VIEWMODEL_ARMS_ROLE,
     WEAPON_BODY_ROLE,
     WEAPON_KEY_PROP,
     WEAPON_ROOT_ROLE,
@@ -34,7 +38,11 @@ from .core.targets import (
     held_weapon_objects,
     held_weapon_root,
     is_agent,
+    is_character_rig,
+    is_firstperson_root,
+    is_pov_camera,
     is_standalone_weapon,
+    is_viewmodel_arms,
     is_weapon_root,
     weapon_key,
     weapon_objects,
@@ -282,11 +290,14 @@ def import_weapon(context: bpy.types.Context, session: Session, weapon: Weapon) 
 
 
 def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.types.Object, weapon: Weapon) -> bpy.types.Object:
-    """Put a weapon on the agent's weapon bone, where third-person clips expect it."""
+    """Put a weapon on the rig's weapon bone, where third-person or viewmodel clips expect it."""
     if WEAPON_BONE not in armature.data.bones:
-        raise RuntimeError(f"This agent has no '{WEAPON_BONE}' bone to hold a weapon.")
-    agent = session.agent(armature[AGENT_KEY_PROP])
-    bone_in_game = _game_rest_matrix(ensure_model_export(session, agent), WEAPON_BONE)
+        raise RuntimeError(f"This skeleton has no '{WEAPON_BONE}' bone to hold a weapon.")
+    if is_viewmodel_arms(armature):
+        bone_in_game = _game_rest_matrix(session.fp_model_export(), WEAPON_BONE)
+    else:
+        agent = session.agent(armature[AGENT_KEY_PROP])
+        bone_in_game = _game_rest_matrix(ensure_model_export(session, agent), WEAPON_BONE)
     glb = _export_weapon_glb(session, weapon)
 
     # The game lines the weapon's own root bone up with the agent's weapon bone,
@@ -324,8 +335,18 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
 
 
 def find_agent_armature(context: bpy.types.Context) -> bpy.types.Object | None:
-    """The agent the panel acts on: the active one, else a selected one, else the only one."""
+    """The third-person agent the panel acts on: the active one, else a selected one, else the only one."""
     return targets.find_agent_armature(context.active_object, context.selected_objects, context.scene.objects)
+
+
+def find_viewmodel_arms(context: bpy.types.Context) -> bpy.types.Object | None:
+    """The first-person arms rig the panel acts on: the active one, else a selected one, else the only one."""
+    return targets.find_viewmodel_arms(context.active_object, context.selected_objects, context.scene.objects)
+
+
+def find_character_rig(context: bpy.types.Context) -> bpy.types.Object | None:
+    """The third-person agent or first-person arms the panel acts on."""
+    return targets.find_character_rig(context.active_object, context.selected_objects, context.scene.objects)
 
 
 def find_standalone_weapon(context: bpy.types.Context) -> bpy.types.Object | None:
@@ -334,7 +355,7 @@ def find_standalone_weapon(context: bpy.types.Context) -> bpy.types.Object | Non
 
 
 def find_weapon_target(context: bpy.types.Context) -> bpy.types.Object | None:
-    """What the Weapon section acts on: an agent (for its held weapon) or a standalone weapon."""
+    """What the Weapon section acts on: a character rig (for its held weapon) or a standalone weapon."""
     return targets.find_weapon_target(context.active_object, context.selected_objects, context.scene.objects)
 
 
@@ -384,26 +405,44 @@ def _import_grafted(context, rig_glb: Path, clip_glb: Path, clip: str, work_dir:
 
 
 def load_clip(context: bpy.types.Context, session: Session, armature: bpy.types.Object, clip: str) -> bpy.types.Action:
-    """Convert one game clip for this agent and make it the armature's action."""
+    """Convert one game clip for this third-person agent or first-person arms rig and make it its action."""
     label = catalog_mod.clip_label(clip)
-    # Reuse a clip already loaded for this agent. Names are not reliable for this:
-    # two agents with the same clip get "name" and "name.001".
+    fp = is_viewmodel_arms(armature)
+    # Reuse a clip already loaded for this rig type / agent. Names are not reliable for this:
+    # two rigs with the same clip get "name" and "name.001".
     for existing in bpy.data.actions:
-        if existing.get(CLIP_KEY_PROP) == clip and existing.get(AGENT_KEY_PROP) == armature[AGENT_KEY_PROP]:
+        if existing.get(CLIP_KEY_PROP) != clip:
+            continue
+        if fp and existing.get(ROLE_PROP) == VIEWMODEL_ARMS_ROLE:
+            _assign_action(armature, existing)
+            _fit_frame_range(context, existing)
+            load_weapon_clip(context, session, armature)
+            return existing
+        if not fp and existing.get(ROLE_PROP) != VIEWMODEL_ARMS_ROLE and existing.get(AGENT_KEY_PROP) == armature[AGENT_KEY_PROP]:
             _assign_action(armature, existing)
             _fit_frame_range(context, existing)
             load_weapon_clip(context, session, armature)
             return existing
 
     info = session.clip_info(clip)
-    if info.get("skeleton") != clipdata.WORLDMODEL:
+    expected_skeleton = clipdata.VIEWMODEL if fp else clipdata.WORLDMODEL
+    if info.get("skeleton") != expected_skeleton:
         skeleton = info.get("skeleton_path", "").rsplit("/", 1)[-1] or "another skeleton"
+        if fp:
+            raise RuntimeError(f"'{label}' is made for {skeleton}, not the first-person arms skeleton.")
         raise RuntimeError(f"'{label}' is made for {skeleton}, not the agent skeleton, so it cannot play on an agent.")
-    agent_key = armature[AGENT_KEY_PROP]
-    agent = session.agent(agent_key)
+
     clip_glb, composed = session.export_clip(clip)
-    action = import_clip_action(context, session.rig_export(agent), clip_glb, clip)
-    action[AGENT_KEY_PROP] = agent_key
+    if fp:
+        rig_glb = session.fp_rig_export()
+    else:
+        agent_key = armature[AGENT_KEY_PROP]
+        rig_glb = session.rig_export(session.agent(agent_key))
+    action = import_clip_action(context, rig_glb, clip_glb, clip)
+    if fp:
+        action[ROLE_PROP] = VIEWMODEL_ARMS_ROLE
+    else:
+        action[AGENT_KEY_PROP] = armature[AGENT_KEY_PROP]
     if composed:
         action[COMPOSED_PROP] = True
     action.use_fake_user = True

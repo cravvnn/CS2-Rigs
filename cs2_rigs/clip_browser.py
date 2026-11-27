@@ -245,7 +245,8 @@ class Browser:
     preview_dir: Path | None
     family: str = ""  # the held weapon's clip family, highlighted in the tree
     weapon: str = ""  # the held weapon's key
-    agent: str = ""  # name of the agent clips load onto
+    agent: str = ""  # name of the agent or FP rig clips load onto
+    mode: str = "world"  # "world" for third-person agents, "viewmodel" for first-person arms
     open_family: bool = False  # open on the family (Only Clips for the Held Weapon)
     can_build: bool = False
     query: str = ""
@@ -261,9 +262,9 @@ class Browser:
     _previews: dict[str, cb.Preview | None] = field(default_factory=dict)
 
     def __post_init__(self):
-        self.tree = cb.build_tree(self.clips)
-        self.first_folder = cb.held_folder(self.clips, self.family, self.weapon) if self.family else ""
-        self.node = cb.default_node(self.tree, self.family if self.open_family else "")
+        self.tree = cb.build_tree(self.clips, mode=self.mode)
+        self.first_folder = cb.held_folder(self.clips, self.family, self.weapon, mode=self.mode) if self.family else ""
+        self.node = cb.default_node(self.tree, self.family if self.open_family else "", mode=self.mode)
         self.has_previews = bool(self.preview_dir and next(Path(self.preview_dir).glob("*.json"), None))
         self.refilter()
 
@@ -325,8 +326,9 @@ def _draw_header(p: Painter, b: Browser, lay: cb.Layout) -> None:
     x = h.x + lay.pad + 4 * s
     p.text(x, _baseline(h, lay.title), "Browse Clips", lay.title, COLORS["text"])
     x += p.width("Browse Clips", lay.title) + 14 * s
-    usable = sum(1 for clip in b.clips if clip.usable)
-    p.text(x, _baseline(h, lay.small), f"{usable} clips for agents", lay.small, COLORS["dim"])
+    usable = sum(1 for clip in b.clips if clip.usable_for(b.mode))
+    kind = "first-person" if b.mode == "viewmodel" else "agents"
+    p.text(x, _baseline(h, lay.small), f"{usable} clips for {kind}", lay.small, COLORS["dim"])
     if b.weapon:
         note = f"Holding {b.weapon.replace('_', ' ')}: {b.family} clips fit"
         room = lay.close.x - lay.pad
@@ -367,7 +369,8 @@ def _draw_tree(p: Painter, b: Browser, lay: cb.Layout) -> None:
             label = node.label.upper() if group else node.label
             size = lay.small if group else lay.text
             p.text(x, _baseline(r, size), p.fit(label, size, room), size, colour)
-            if b.family and node.key == f"world/{b.family}":
+            prefix = "viewmodel" if b.mode == "viewmodel" else "world"
+            if b.family and node.key == f"{prefix}/{b.family}":
                 p.circle(r.right - 16 * s - number_w, r.y + r.h / 2, 3 * s, COLORS["t"])
     _scrollbar(p, b, lay, "tree", view, len(b.tree), b.tree_scroll)
 
@@ -416,7 +419,7 @@ def _draw_list(p: Painter, b: Browser, lay: cb.Layout) -> None:
             verdict = cb.verdict(b.status, clip)
             if verdict:
                 right = _badge(p, lay, right, r, verdict) - 8 * s
-            name_colour = COLORS["text"] if clip.usable else COLORS["faint"]
+            name_colour = COLORS["text"] if clip.usable_for(b.mode) else COLORS["faint"]
             name = p.fit(clip.name, lay.text, right - x)
             p.text(x, _baseline(r, lay.text), name, lay.text, name_colour)
             where = clip.label[: -len(clip.name) - 1] if node.key in (cb.ALL_NODE, cb.UNUSABLE_NODE) or node.depth == 0 else clip.folder
@@ -501,14 +504,15 @@ def _draw_preview(p: Painter, b: Browser, lay: cb.Layout, now: float) -> None:
     if preview:
         caption += f", {len(preview.frames)} frames"
     p.text(pane.x + pad, caption_y, p.fit(caption, lay.small, right - pane.x - pad), lay.small, COLORS["dim"])
-    if clip.reason:
-        note = clip.reason
+    reason = clip.reason_for(b.mode)
+    if reason:
+        note = reason
     elif b.status is None:
         note = "Clips have not been checked yet."
     else:
         note = str((b.status.get(clip.path) or {}).get("note") or "")
     if note:
-        colour = COLORS["warn"] if clip.reason else COLORS["faint"]
+        colour = COLORS["warn"] if reason else COLORS["faint"]
         p.text(pane.x + pad, caption_y - 18 * s, p.fit(note, lay.small, pane.w - 2 * pad), lay.small, colour)
 
 
@@ -675,7 +679,8 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             self.report({"ERROR"}, "No clips found. Press Refresh first.")
             return {"CANCELLED"}
         wm = context.window_manager
-        armature = importer.find_agent_armature(context)
+        armature = importer.find_character_rig(context)
+        mode = "viewmodel" if importer.is_viewmodel_arms(armature) else "world"
         key = importer.held_weapon_key(armature) if armature else ""
         weapon = next((w for w in catalog_mod.catalog_weapons(data) if w.key == key), None) if key else None
         status_path = _cache_file(current.cache, "clip_status_file", "clip_status.json")
@@ -685,7 +690,8 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             preview_dir=_cache_file(current.cache, "clip_preview_dir", "clip_previews"),
             family=catalog_mod.clip_family(weapon) if weapon else "",
             weapon=weapon.key if weapon else "",
-            agent=armature.name.removesuffix(".skeleton") if armature else "",
+            agent=armature.name.removesuffix(".fp_skeleton").removesuffix(".skeleton") if armature else "",
+            mode=mode,
             open_family=bool(weapon) and wm.cs2rig_match_clips,
             can_build=_can_build_previews(),
         )
@@ -829,11 +835,12 @@ class CS2RIG_OT_browse_clips(bpy.types.Operator):
             browser.show(browser.visible[0])
 
     def _load(self, context, browser: Browser, clip: cb.Clip):
-        if not clip.usable:
-            browser.message = f"{clip.name} cannot be loaded: {clip.reason[:1].lower()}{clip.reason[1:]}."
+        if not clip.usable_for(browser.mode):
+            reason = clip.reason_for(browser.mode)
+            browser.message = f"{clip.name} cannot be loaded: {reason[:1].lower()}{reason[1:]}."
             return {"RUNNING_MODAL"}
         if not bpy.ops.cs2rig.load_clip.poll():
-            browser.message = "Select an imported agent first, then click a clip to load it."
+            browser.message = "Select an imported agent or first-person rig first, then click a clip to load it."
             return {"RUNNING_MODAL"}
         close_browser()
         context.window_manager.cs2rig_clip = clip.label
