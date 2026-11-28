@@ -13,9 +13,10 @@ from pathlib import Path
 import bpy
 from bpy.props import BoolProperty, CollectionProperty, EnumProperty, FloatProperty, IntProperty, StringProperty
 
-from . import clip_browser, clip_previews, eyes, gloves, importer, maps, paint, rig, session, stickers, studio, updater, viewmodel
+from . import clip_browser, clip_previews, eyes, gloves, hdri, importer, maps, paint, rig, session, stickers, studio, updater, viewmodel
 from .core import cache as cache_mod
 from .core import clipdata as clipdata_mod
+from .core import hdri as hdri_core
 from .core import log as log_mod
 from .core import catalog as catalog_mod
 from .core import gloves as gloves_mod
@@ -25,7 +26,7 @@ from .core import stickers as stickers_mod
 from .core import studio as studio_core
 from .core import viewmodel as vm_core
 from .core.download import CLI_VERSION
-from .map_build import MAP_NAME_PROP
+from .map_build import MAP_NAME_PROP, PROBE_INDEX_PROP, PROBE_LABEL_PROP, WORLD_KIND_PROP
 
 # Filled by Read Game Files. Blender's enum callbacks need the item lists kept alive here.
 _agent_items: list[tuple[str, str, str]] = []
@@ -43,6 +44,8 @@ _glove_items: list[tuple[str, str, str]] = []
 _stickers_by_search: dict[str, stickers_mod.StickerKit] = {}
 _stickers_by_material: dict[str, stickers_mod.StickerKit] = {}
 _sticker_search_by_material: dict[str, str] = {}
+_hdri_items: list[tuple[str, str, str]] = []
+_hdri_skies: dict[str, hdri_core.Skybox] = {}
 _map_job: maps.BuildJob | None = None
 _preview_job: clip_previews.PreviewJob | None = None
 _glove_job: gloves.GloveJob | None = None
@@ -51,6 +54,7 @@ _exit_hooked = False
 _syncing_studio = False
 _syncing_pov = False
 _syncing_sticker = False
+_syncing_hdri = False
 _sticker_slot_items: list[tuple[str, str, str]] = [
     (str(i), f"Slot {i + 1}", f"Weapon sticker slot {i + 1}")
     for i in range(stickers_mod.MAX_SLOTS)
@@ -63,6 +67,7 @@ _pov_preset_items: list[tuple[str, str, str]] = [
     (vm_core.PRESETS[key].key, vm_core.PRESETS[key].label, vm_core.PRESETS[key].description)
     for key in vm_core.PRESET_ORDER
 ]
+_probe_enum_items: list[tuple[str, str, str]] = []
 
 
 def _on_studio_setting_changed(self, context) -> None:
@@ -71,6 +76,26 @@ def _on_studio_setting_changed(self, context) -> None:
         return
     if studio.has_studio(context.scene):
         studio.apply_studio_look(context, self.cs2rig_studio_preset, self.cs2rig_studio_backdrop)
+
+
+def _on_hdri_strength_changed(self, context) -> None:
+    """Drive the active CS2 sky's strength live, on a standalone HDRI, map sky or cubemap probe."""
+    if _syncing_hdri or context is None or context.scene is None:
+        return
+    if hdri.has_hdri(context.scene):
+        hdri.set_strength(context.scene, self.cs2rig_hdri_strength)
+
+
+def _on_hdri_rotation_changed(self, context) -> None:
+    """Drive the active CS2 sky's rotation live, on a standalone HDRI, map sky or cubemap probe."""
+    if _syncing_hdri or context is None or context.scene is None:
+        return
+    if hdri.has_hdri(context.scene):
+        hdri.set_rotation(context.scene, self.cs2rig_hdri_rotation)
+
+
+def _hdri_enum(self, context):
+    return _hdri_items or [("NONE", "No CS2 skies", "Read the game files to list the game's skies")]
 
 
 def _sync_sticker_controls(context) -> None:
@@ -385,7 +410,23 @@ def _fill_lists(context: bpy.types.Context, current: session.Session) -> None:
         if kit.name in _paintable
     ]
     _fill_stickers(context, current.stickers())
+    _fill_hdri(current)
     _fill_clips(context)
+
+
+def _fill_hdri(current: session.Session) -> None:
+    """List the game's skies. The catalogue is built once and kept in the cache."""
+    try:
+        skies = hdri_core.available(current.cache.hdri_dir, current.converter, current.install.main_package)
+    except (RuntimeError, OSError) as exc:  # the rest of the panel still works without skies
+        log_mod.logger.warning("listing the CS2 skies failed: %s", exc)
+        return
+    _hdri_skies.clear()
+    _hdri_skies.update({sky.key: sky for sky in skies})
+    _hdri_items[:] = [
+        (sky.key, sky.label, sky.material + (f", the sky {sky.map} uses" if sky.map else ""))
+        for sky in skies
+    ]
 
 
 def _fill_stickers(context: bpy.types.Context, sticker_list: list[stickers_mod.StickerKit]) -> None:
@@ -443,8 +484,23 @@ def _choose(wm, name: str, value, items) -> None:
         setattr(wm, name, value)
 
 
+def _sync_hdri_controls(context: bpy.types.Context) -> None:
+    """Point the HDRI dropdown and sliders at the CS2 sky the scene is using."""
+    global _syncing_hdri
+    if context is None or not hdri.has_hdri(context.scene):
+        return
+    wm = context.window_manager
+    _syncing_hdri = True
+    try:
+        _choose(wm, "cs2rig_hdri", hdri.key(context.scene.world), _hdri_items)
+        wm.cs2rig_hdri_strength = hdri.strength(context.scene)
+        wm.cs2rig_hdri_rotation = hdri.rotation_offset(context.scene)
+    finally:
+        _syncing_hdri = False
+
+
 def _sync_to_scene(context: bpy.types.Context) -> None:
-    """Point the panel at what the scene has: studio settings, agent/FP rig, weapon, finish, gloves and clip."""
+    """Point the panel at what the scene has: studio settings, HDRI, agent/FP rig, weapon, finish, gloves and clip."""
     global _syncing_studio, _syncing_pov
     wm = context.window_manager
     if studio.has_studio(context.scene):
@@ -454,6 +510,8 @@ def _sync_to_scene(context: bpy.types.Context) -> None:
             wm.cs2rig_studio_backdrop = studio.studio_backdrop_enabled(context.scene)
         finally:
             _syncing_studio = False
+    if hdri.has_hdri(context.scene):
+        _sync_hdri_controls(context)
     armature = importer.find_character_rig(context)
     if armature is not None:
         _choose(wm, "cs2rig_agent", armature.get(importer.AGENT_KEY_PROP), _agent_items)
@@ -1634,6 +1692,10 @@ class CS2RIG_OT_add_map(bpy.types.Operator):
             self.report({"INFO"}, f"Linked {game_map.name} to its new file.")
             return {"FINISHED"}
         maps.add_sky(context.scene, game_map.name, library, collection, link, use_map)
+        probes = maps.probe_worlds(collection)
+        if probes:
+            context.window_manager.cs2rig_map_probe = f"{game_map.name}|{int(probes[0]['index'])}"
+        _sync_hdri_controls(context)
         world = context.scene.world
         real = world is not None and world.get(MAP_NAME_PROP) == game_map.name
         if not use_map:
@@ -1739,7 +1801,95 @@ class CS2RIG_OT_apply_map_sky(bpy.types.Operator):
         if not maps.apply_map_sky(context.scene, self.name, library, collection):
             _report_error(self, context, f"{self.name} was built without a sky. Rebuild it to get one.")
             return {"CANCELLED"}
+        _sync_hdri_controls(context)
         self.report({"INFO"}, f"Applied {self.name}'s sky and lights.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_apply_map_probes(bpy.types.Operator):
+    bl_idname = "cs2rig.apply_map_probes"
+    bl_label = "Apply Indoor Cubemap"
+    bl_description = (
+        "Light the scene with one of this map's baked indoor cubemap HDR probes. "
+        "Pick which one in the Cubemap Probe list"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    name: StringProperty()
+    index: IntProperty(default=-1)  # -1: the probe picked in the panel, else the map's best one
+
+    @_reports_errors
+    def execute(self, context):
+        collection = maps.maps_in_scene(context.scene).get(self.name)
+        if collection is None:
+            _report_error(self, context, f"{self.name} is not in this scene.")
+            return {"CANCELLED"}
+        index = self.index if self.index >= 0 else _chosen_probe(context, self.name)
+        if not maps.probe_worlds(collection):
+            _report_error(self, context, f"{self.name} has no baked indoor cubemap probes.")
+            return {"CANCELLED"}
+        library = maps.library_path(session.get(), _maps[self.name]) if self.name in _maps else None
+        applied = maps.apply_map_probes(context.scene, self.name, library, collection, index if index >= 0 else None)
+        if applied is None:
+            _report_error(self, context, f"{self.name}'s cubemap probe could not be loaded. Rebuild the map.")
+            return {"CANCELLED"}
+        context.window_manager.cs2rig_map_probe = f"{self.name}|{applied}"
+        _sync_hdri_controls(context)
+        self.report({"INFO"}, f"Applied {self.name}'s indoor cubemap {applied}.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_apply_hdri(bpy.types.Operator):
+    bl_idname = "cs2rig.apply_hdri"
+    bl_label = "Apply HDRI"
+    bl_description = (
+        "Light the scene with the chosen CS2 sky, in one click. It takes about a second the first time, "
+        "then it is instant; HDRI Strength and HDRI Rotation adjust it live"
+    )
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        if not _hdri_skies:
+            cls.poll_message_set(_NEEDS_REFRESH)
+            return False
+        return context.scene is not None
+
+    @_reports_errors
+    def execute(self, context):
+        skybox = _hdri_skies.get(context.window_manager.cs2rig_hdri)
+        if skybox is None:
+            _report_error(self, context, "Choose a CS2 HDRI first.")
+            return {"CANCELLED"}
+        current = session.get()
+        sky = hdri_core.extract(
+            current.converter,
+            Path(current.install.main_package),
+            skybox,
+            current.cache.hdri_dir / skybox.key,
+        )
+        hdri.apply(context.scene, sky)
+        _sync_hdri_controls(context)
+        self.report({"INFO"}, f"Lit with {sky.label}. Adjust it with HDRI Strength and HDRI Rotation.")
+        return {"FINISHED"}
+
+
+class CS2RIG_OT_remove_hdri(bpy.types.Operator):
+    bl_idname = "cs2rig.remove_hdri"
+    bl_label = "Remove HDRI"
+    bl_description = "Take the CS2 sky off the scene and put back the world it replaced"
+    bl_options = {"REGISTER", "UNDO"}
+
+    @classmethod
+    def poll(cls, context):
+        return context.scene is not None and hdri.is_cs2_sky_world(context.scene.world)
+
+    @_reports_errors
+    def execute(self, context):
+        if not hdri.remove(context.scene):
+            _report_error(self, context, "The scene has no CS2 HDRI to remove.")
+            return {"CANCELLED"}
+        self.report({"INFO"}, "Removed the CS2 HDRI.")
         return {"FINISHED"}
 
 
@@ -1922,12 +2072,38 @@ def _map_header(context: bpy.types.Context) -> str:
     missing = len(maps.missing_maps())
     if missing:
         names.append(f"{missing} missing")
+    world = context.scene.world
+    if world is not None and world.get(WORLD_KIND_PROP) == "probe" and world.get(MAP_NAME_PROP) in names:
+        label = str(world.get(PROBE_LABEL_PROP) or f"Cubemap {int(world.get(PROBE_INDEX_PROP, 0))}")
+        return f"{world.get(MAP_NAME_PROP)} · {label}"
     return ", ".join(names) if names else "None"
+
+
+def _chosen_probe(context: bpy.types.Context, name: str) -> int:
+    """The probe picked in the panel when it belongs to this map, else -1 for the map's best."""
+    map_name, _, index = context.window_manager.cs2rig_map_probe.partition("|")
+    return int(index) if map_name == name and index.isdigit() else -1
+
+
+def _probe_items(self, context) -> list[tuple[str, str, str]]:
+    """Every indoor cubemap probe of every map in the scene, by map."""
+    if context is None or getattr(context, "scene", None) is None:
+        return _PRESS_REFRESH
+    items = []
+    for name, collection in maps.maps_in_scene(context.scene).items():
+        for probe in maps.probe_worlds(collection):
+            index = int(probe.get("index", -1))
+            if index < 0:
+                continue
+            label = str(probe.get("label") or f"Cubemap {index}")
+            items.append((f"{name}|{index}", f"{name} · {label}", f"{name}: {label}"))
+    _probe_enum_items[:] = items or _PRESS_REFRESH
+    return _probe_enum_items
 
 
 def _studio_header(context: bpy.types.Context) -> str:
     if not studio.has_studio(context.scene):
-        return "Off"
+        return f"HDRI {hdri.label(context.scene.world)}" if hdri.has_hdri(context.scene) else "Off"
     label = studio_core.get_preset(studio.studio_preset(context.scene)).label
     return f"{label} · Turntable" if studio.has_turntable(context.scene) else label
 
@@ -2165,6 +2341,9 @@ def _draw_map(layout, context) -> None:
     body.prop(wm, "cs2rig_map")
     body.prop(wm, "cs2rig_map_link")
     body.prop(wm, "cs2rig_map_sky")
+    collections = maps.maps_in_scene(context.scene)
+    if any(maps.probe_worlds(collection) for collection in collections.values()):
+        body.prop(wm, "cs2rig_map_probe")
     job = _building()
     if job is not None:
         row = body.row(align=True)
@@ -2172,11 +2351,13 @@ def _draw_map(layout, context) -> None:
         row.operator("cs2rig.cancel_map_build", text="Cancel", icon="X")
     else:
         body.operator("cs2rig.add_map", icon="WORLD")
-    for name, collection in maps.maps_in_scene(context.scene).items():
+    for name, collection in collections.items():
         row = body.row(align=True)
         kind = "linked" if collection.library is not None else "copied"
         row.label(text=f"{name} · {kind}", icon="OUTLINER_COLLECTION")
         row.operator("cs2rig.apply_map_sky", text="", icon="LIGHT").name = name
+        if maps.probe_worlds(collection):
+            row.operator("cs2rig.apply_map_probes", text="", icon="IMAGE_DATA").name = name
         row.operator("cs2rig.remove_map", text="", icon="X").name = name
         game_map = _maps.get(name)
         if game_map is not None and _newer_build(game_map):
@@ -2195,6 +2376,15 @@ def _draw_studio(layout, context) -> None:
         return
     body.use_property_split = True
     wm = context.window_manager
+    body.prop(wm, "cs2rig_hdri")
+    row = body.row(align=True)
+    row.operator("cs2rig.apply_hdri", icon="WORLD")
+    row.operator("cs2rig.remove_hdri", text="", icon="X")
+    sliders = body.column()
+    sliders.use_property_split = True
+    sliders.enabled = hdri.has_hdri(context.scene)
+    sliders.prop(wm, "cs2rig_hdri_strength")
+    sliders.prop(wm, "cs2rig_hdri_rotation")
     body.prop(wm, "cs2rig_studio_preset")
     body.prop(wm, "cs2rig_studio_backdrop")
     if not studio.has_studio(context.scene):
@@ -2333,6 +2523,9 @@ _classes = (
     CS2RIG_OT_add_map,
     CS2RIG_OT_remove_map,
     CS2RIG_OT_apply_map_sky,
+    CS2RIG_OT_apply_map_probes,
+    CS2RIG_OT_apply_hdri,
+    CS2RIG_OT_remove_hdri,
     CS2RIG_OT_add_studio,
     CS2RIG_OT_remove_studio,
     CS2RIG_OT_frame_studio,
@@ -2461,6 +2654,11 @@ def register():
         description="Use the map's real CS2 sky and its calibrated lights. Turn off for the plain fallback sky and no map lights",
         default=True,
     )
+    wm.cs2rig_map_probe = EnumProperty(
+        name="Cubemap Probe",
+        description="Which baked indoor cubemap of the maps in this scene to use for its lighting",
+        items=_probe_items,
+    )
     wm.cs2rig_clips = CollectionProperty(type=CS2RIG_ClipName)
     wm.cs2rig_clip = StringProperty(name="Clip", description="The game animation to load on the selected agent")
     wm.cs2rig_match_clips = BoolProperty(
@@ -2481,6 +2679,32 @@ def register():
         description="Show the seamless curved studio backdrop behind the subject",
         default=True,
         update=_on_studio_setting_changed,
+    )
+    wm.cs2rig_hdri = EnumProperty(
+        name="CS2 HDRI",
+        description="A real in-game CS2 sky to light this scene with, with no map needed",
+        items=_hdri_enum,
+    )
+    wm.cs2rig_hdri_strength = FloatProperty(
+        name="HDRI Strength",
+        description="Brightness of the active CS2 sky. Updates live, on a standalone HDRI or a map's own sky",
+        min=0.0,
+        max=50.0,
+        soft_max=8.0,
+        default=1.0,
+        step=10,
+        precision=2,
+        update=_on_hdri_strength_changed,
+    )
+    wm.cs2rig_hdri_rotation = FloatProperty(
+        name="HDRI Rotation",
+        description="Turn the active CS2 sky about Z, in degrees from the direction its material gives it. Updates live",
+        min=-360.0,
+        max=360.0,
+        default=0.0,
+        step=100,
+        precision=1,
+        update=_on_hdri_rotation_changed,
     )
     wm.cs2rig_pov_preset = EnumProperty(
         name="Preset",
@@ -2560,6 +2784,9 @@ def unregister():
         "cs2rig_pov_offset_x",
         "cs2rig_pov_fov",
         "cs2rig_pov_preset",
+        "cs2rig_hdri_rotation",
+        "cs2rig_hdri_strength",
+        "cs2rig_hdri",
         "cs2rig_studio_backdrop",
         "cs2rig_studio_preset",
         "cs2rig_glove_seed",
@@ -2579,6 +2806,7 @@ def unregister():
         "cs2rig_match_clips",
         "cs2rig_clip",
         "cs2rig_clips",
+        "cs2rig_map_probe",
         "cs2rig_map_sky",
         "cs2rig_map_link",
         "cs2rig_map",

@@ -38,6 +38,13 @@ assert scene.world is not None, "no sky was added"
 print("MAP sky nodes:", [n.type for n in scene.world.node_tree.nodes] if scene.world.node_tree else None)
 top = maps.maps_in_scene(scene)[name]
 assert top.library is not None, "the map should be linked"
+if not maps.probe_worlds(top):
+    # A library built before indoor cubemap probes existed has none.
+    assert bpy.ops.cs2rig.add_map(name=name, rebuild=True) == {"FINISHED"}
+    top = maps.maps_in_scene(scene)[name]
+probes = maps.probe_worlds(top)
+assert probes, "the map has no indoor cubemap probes"
+print("MAP probes:", [(probe["index"], probe["label"]) for probe in probes])
 meshes = [o for o in top.all_objects if o.type == "MESH"]
 lights = [o for o in top.all_objects if o.type == "LIGHT"]
 print("MAP objects:", len(meshes), "meshes,", len(lights), "lights, collections", [c.name for c in top.children])
@@ -52,6 +59,18 @@ if world.get("cs2rig_map") == name:
     assert environment is not None and environment.image is not None, "the real sky has no image"
     assert tuple(environment.image.size) == (environment.image.size[1] * 2, environment.image.size[1]), environment.image.size
     print("MAP sky image:", environment.image.name, tuple(environment.image.size), "packed", bool(environment.image.packed_file))
+
+# The map's indoor cubemap probe is packed too, and can replace the sky.
+assert bpy.ops.cs2rig.apply_map_probes(name=name) == {"FINISHED"}
+world = scene.world
+assert world.get("cs2rig_world_kind") == "probe", world.get("cs2rig_world_kind")
+assert int(world.get("cs2rig_probe_index", -1)) == int(probes[0]["index"])
+probe_environment = next((n for n in world.node_tree.nodes if n.type == "TEX_ENVIRONMENT"), None)
+assert probe_environment is not None and probe_environment.image is not None, "the probe has no image"
+assert tuple(probe_environment.image.size) == (probe_environment.image.size[1] * 2, probe_environment.image.size[1])
+assert probe_environment.image.packed_file, "the probe image is not packed"
+print("MAP probe image:", probe_environment.image.name, tuple(probe_environment.image.size))
+assert bpy.ops.cs2rig.apply_map_sky(name=name) == {"FINISHED"}
 
 corners = [o.matrix_world @ Vector(c) for o in meshes for c in o.bound_box]
 low = Vector(min(c[i] for c in corners) for i in range(3))
@@ -82,6 +101,10 @@ started = time.time()
 assert bpy.ops.cs2rig.add_map() == {"FINISHED"}
 top = maps.maps_in_scene(scene)[name]
 assert top.library is None
+assert maps.probe_worlds(top), "the copied map has no cubemap probes"
+assert bpy.ops.cs2rig.apply_map_probes(name=name) == {"FINISHED"}
+assert scene.world.library is None and scene.world.get("cs2rig_world_kind") == "probe"
+assert bpy.ops.cs2rig.apply_map_sky(name=name) == {"FINISHED"}
 print(f"MAP appended in {time.time() - started:.0f} s")
 
 # The panel builds on a worker thread; run that path with a small backdrop map and a broken one.

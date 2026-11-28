@@ -300,3 +300,48 @@ def test_a_map_without_an_env_sky_has_no_sky():
     entities_ = [{"classname": "light_environment", "brightness": 2.0, "angles": [0.0, 0.0, 0.0]}]
     assert maplights.sky_source(entities_) is None
     assert len(maplights.lights_from_entities(entities_)) == 1
+
+
+def test_a_disabled_sky_is_used_when_the_map_has_no_enabled_one():
+    # de_ancient, de_anubis, de_vertigo and ar_shoots keep their only env_sky
+    # disabled because a 3D skybox draws the visible sky, but it still names
+    # the map's real lighting sky.
+    entities_ = [
+        {
+            "classname": "env_sky",
+            "skyname": "materials/skybox/sky_hr_aztec_02_lighting.vmat",
+            "targetname": "[PR#]sky_lighting",
+            "StartDisabled": True,
+            "angles": [0.0, 65.0, 0.0],
+        },
+        {
+            "classname": "light_environment",
+            "skytexture": "[PR#]sky_lighting",
+            "skyintensity": 2.5,
+            "brightness": 3.8,
+        },
+    ]
+    source = maplights.sky_source(entities_)
+    assert source is not None
+    assert source["material"] == "materials/skybox/sky_hr_aztec_02_lighting.vmat"
+    assert source["yaw"] == 65.0
+    assert source["skyintensity"] == pytest.approx(2.5)
+
+
+def test_an_enabled_sky_wins_over_a_disabled_one():
+    entities_ = [
+        {"classname": "env_sky", "skyname": "materials/skybox/old.vmat", "targetname": "[PR#]old", "StartDisabled": True},
+        {"classname": "env_sky", "skyname": "materials/skybox/live.vmat", "targetname": "[PR#]live"},
+        {"classname": "light_environment", "skytexture": "[PR#]old"},
+    ]
+    source = maplights.sky_source(entities_)
+    assert source["material"] == "materials/skybox/live.vmat"
+
+
+def test_a_disabled_sky_falls_back_to_the_first_when_the_sun_names_no_target():
+    entities_ = [
+        {"classname": "env_sky", "skyname": "materials/skybox/first.vmat", "targetname": "[PR#]first", "StartDisabled": True},
+        {"classname": "env_sky", "skyname": "materials/skybox/second.vmat", "targetname": "[PR#]second", "StartDisabled": True},
+        {"classname": "light_environment", "skytexture": "[PR#]missing"},
+    ]
+    assert maplights.sky_source(entities_)["material"] == "materials/skybox/first.vmat"

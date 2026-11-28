@@ -91,6 +91,11 @@ class Cache:
     def clip_preview_dir(self) -> Path:
         return self.version_dir / "clip_previews"
 
+    @property
+    def hdri_dir(self) -> Path:
+        """Extracted sky HDRIs: one folder per sky, beside the sky catalogue."""
+        return self.version_dir / "hdri"
+
     def texture_dir(self, path: str, raw: bool = False) -> Path:
         key = f"{path}|raw" if raw else path
         digest = hashlib.sha1(key.encode("utf-8")).hexdigest()[:16]

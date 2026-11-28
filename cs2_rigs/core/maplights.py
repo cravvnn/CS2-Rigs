@@ -3,10 +3,17 @@
 Two things the converted geometry does not carry:
 
 - `env_sky` names the map's sky material. Its shader samples an HDR cubemap,
-  which Source2Viewer writes as a 2:1 equirectangular `.exr`.
+  which Source2Viewer writes as a 2:1 equirectangular `.exr`. Some maps keep
+  their only `env_sky` disabled because a 3D skybox draws the visible sky, but
+  the entity still points at the map's real lighting sky, so a disabled one is
+  used when no enabled one exists.
 - `light_environment`, `light_omni2`, `light_rect` and `light_barn` place the
   sun and the map's lamps. Their intensities are physical and their angles are
   Source's pitch/yaw/roll.
+- `env_combined_light_probe_volume` (and the older `env_cubemap` classes) name
+  an `array_index` in `maps/<map>/cubemaps/env_cubemap_array.vtex_c`, the
+  baked indoor radiance probes. Source2Viewer writes every slice as a 2:1
+  equirectangular `.exr`, which makes a usable indoor HDRI.
 
 The entity lump is KeyValues3, which `core.finish` already parses for materials,
 so its parser is reused here.
@@ -60,7 +67,7 @@ from pathlib import Path
 from . import finish
 from .converter import Converter, ConverterError
 
-MANIFEST_VERSION = 1
+MANIFEST_VERSION = 2  # 2: maps also carry their indoor cubemap probes
 UNIT = 0.0254  # metres per Source unit (one inch)
 LUMENS_PER_WATT = 683.0  # the efficacy Source2Viewer uses for glTF lights
 # CS2 exposes with eye adaptation and baked light probes; a fixed Blender render
@@ -88,6 +95,14 @@ LIGHT_CLASSES = (
 AREA_CLASSES = ("light_rect", "light_ortho")
 SPOT_CLASSES = ("light_barn", "light_spot")
 SUN_CLASSES = ("light_environment", "light_directional")
+PROBE_CLASSES = (
+    "env_combined_light_probe_volume",
+    "env_light_probe_volume",
+    "env_cubemap_box",
+    "env_cubemap",
+)
+PROBE_LIMIT = 4  # indoor probes packed into a map library
+PROBE_STRENGTH = 1.0  # the baked radiance is already in the sky's linear units
 
 _NUMBER = re.compile(r"[-+]?(?:\d+\.?\d*|\.\d+)(?:[eE][-+]?\d+)?")
 
@@ -104,6 +119,19 @@ class Sky:
     rotation: float  # Mapping node Z rotation, degrees
     yaw: float  # env_sky's own yaw, degrees
     exposure_bias: float  # g_flBrightnessExposureBias
+
+
+@dataclass(frozen=True)
+class Probe:
+    """One baked indoor cubemap of a map, ready for a Blender World."""
+
+    index: int  # slice in env_cubemap_array.vtex
+    label: str  # "Cubemap 24 · indoor 2"
+    origin: tuple[float, float, float]  # Source units
+    indoor: int  # indoor_outdoor_level: -2 fully outdoor, 2 fully indoor
+    file: str  # the exported equirectangular .exr
+    strength: float  # Background node strength
+    rotation: float  # Mapping node Z rotation, degrees
 
 
 @dataclass(frozen=True)
@@ -132,12 +160,14 @@ class Extras:
     lights: list[Light]
     entities: int
     ignored: int  # light entities that were disabled or carried no energy
+    probes: list[Probe] | None = None
 
     def as_dict(self) -> dict:
         return {
             "version": MANIFEST_VERSION,
             "sky": asdict(self.sky) if self.sky is not None else None,
             "lights": [asdict(light) for light in self.lights],
+            "probes": [asdict(probe) for probe in self.probes or ()],
             "light_gain": LIGHT_GAIN,
             "entities": self.entities,
             "ignored": self.ignored,
@@ -162,13 +192,24 @@ def parse_entities(text: str) -> list[dict]:
 
 
 def sky_source(entities: list[dict]) -> dict | None:
-    """The enabled `env_sky` the sun points at, or the first enabled one."""
-    skies = [entity for entity in entities if entity.get("classname") == "env_sky" and _enabled(entity)]
+    """The sun's `env_sky`, preferring an enabled one, then a disabled one.
+
+    A 3D-skybox map such as de_ancient keeps its only `env_sky` disabled, but
+    the entity still names the map's real lighting sky. Enabled skies win when
+    a map has both; within either group the sun's `skytexture` target is used,
+    or the first one when it names no target.
+    """
+    skies = [entity for entity in entities if entity.get("classname") == "env_sky"]
     if not skies:
         return None
+    enabled = [entity for entity in skies if _enabled(entity)]
+    candidates = enabled or skies
     sun = next((entity for entity in entities if entity.get("classname") == SUN), None)
     wanted = _text(sun.get("skytexture")) if sun is not None else ""
-    chosen = next((entity for entity in skies if wanted and _text(entity.get("targetname")) == wanted), skies[0])
+    chosen = next(
+        (entity for entity in candidates if wanted and _text(entity.get("targetname")) == wanted),
+        candidates[0],
+    )
     material = _text(chosen.get("skyname"))
     if not material:
         return None
@@ -215,6 +256,62 @@ def make_sky(source: dict, texture: str, file: str, exposure_bias: float) -> Sky
 def sky_rotation(yaw: float) -> float:
     """The Mapping node's Z rotation in degrees for an `env_sky` yaw."""
     return SKY_BASE_ROTATION - yaw
+
+
+def cubemap_probes(entities: list[dict], limit: int = PROBE_LIMIT) -> list[dict]:
+    """The map's baked cubemap probes, the most indoor and largest first.
+
+    Source bakes one cubemap per probe volume into
+    `maps/<map>/cubemaps/env_cubemap_array.vtex_c`; an entity's `array_index`
+    names its slice. The four most indoor spaces are enough to choose from
+    without packing gigabytes of probes into every built map.
+    """
+    unique = {}
+    for entity in entities:
+        if entity.get("classname") not in PROBE_CLASSES:
+            continue
+        index = int(_number(entity.get("array_index"), -1))
+        if index < 0:
+            continue
+        mins = _vector(entity.get("box_mins"))
+        maxs = _vector(entity.get("box_maxs"))
+        volume = math.prod(max(0.0, maxs[axis] - mins[axis]) for axis in range(3))
+        level = int(_number(entity.get("indoor_outdoor_level"), 0))
+        candidate = {
+            "index": index,
+            "indoor": level,
+            "origin": _vector(entity.get("origin")),
+            "volume": volume,
+            "yaw": _vector(entity.get("angles"))[1],
+        }
+        previous = unique.get(index)
+        if previous is None or (level, volume) > (previous["indoor"], previous["volume"]):
+            unique[index] = candidate
+    ranked = sorted(unique.values(), key=lambda probe: (-probe["indoor"], -probe["volume"], probe["index"]))
+    return ranked[: max(1, limit)]
+
+
+def probe_label(index: int, indoor: int) -> str:
+    """A probe's name for the panel and the report."""
+    return f"Cubemap {index} · indoor {indoor}"
+
+
+def make_probe(source: dict, file: str) -> Probe:
+    """Calibrate a baked cubemap for a Blender World.
+
+    The exported radiance is already in the same linear units as the map's
+    sky, so it needs no exposure lift; only Source2Viewer's quarter-turn
+    cubemap-to-equirect mapping is corrected.
+    """
+    return Probe(
+        index=int(source["index"]),
+        label=probe_label(int(source["index"]), int(source["indoor"])),
+        origin=tuple(source["origin"]),
+        indoor=int(source["indoor"]),
+        file=str(file),
+        strength=PROBE_STRENGTH,
+        rotation=sky_rotation(float(source["yaw"])),
+    )
 
 
 def lights_from_entities(entities: list[dict]) -> list[Light]:
@@ -383,8 +480,9 @@ def extract(
     main_package: Path,
     map_name: str,
     texture_dir: Path,
+    probe_dir: Path | None = None,
 ) -> Extras:
-    """Read a map's sky and lights, exporting its sky texture into `texture_dir`."""
+    """Read a map's sky, lights and indoor probes, exporting the images."""
     text = converter.dump(Path(map_package), f"maps/{map_name}/entities/default_ents.vents_c")
     entities = parse_entities(text)
     source = sky_source(entities)
@@ -407,7 +505,40 @@ def extract(
                 sky = make_sky(source, texture, exported, exposure_bias)
     lights = lights_from_entities(entities)
     light_entities = sum(1 for entity in entities if entity.get("classname") in LIGHT_CLASSES)
-    return Extras(sky=sky, lights=lights, entities=len(entities), ignored=max(0, light_entities - len(lights)))
+    probes = _probes(converter, Path(map_package), map_name, entities, probe_dir)
+    return Extras(
+        sky=sky,
+        lights=lights,
+        entities=len(entities),
+        ignored=max(0, light_entities - len(lights)),
+        probes=probes,
+    )
+
+
+def _probes(
+    converter: Converter,
+    map_package: Path,
+    map_name: str,
+    entities: list[dict],
+    probe_dir: Path | None,
+) -> list[Probe]:
+    """Export the chosen cubemap slices, or no probes when the map has none."""
+    if probe_dir is None:
+        return []
+    sources = cubemap_probes(entities)
+    if not sources:
+        return []
+    array = f"maps/{map_name}/cubemaps/env_cubemap_array.vtex"
+    try:
+        files = converter.export_texture_slices(
+            map_package,
+            array + "_c",
+            Path(probe_dir),
+            keep={source["index"] for source in sources},
+        )
+    except ConverterError:
+        return []
+    return [make_probe(source, files[source["index"]]) for source in sources if source["index"] in files]
 
 
 def _dump_any(converter: Converter, packages: tuple[Path, ...], path: str) -> str | None:

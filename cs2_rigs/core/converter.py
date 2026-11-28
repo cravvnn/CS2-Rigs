@@ -78,6 +78,41 @@ def exported_path(out_dir: Path, path: str, suffix: str = ".glb") -> Path:
     """Where the converter writes 'a/b.vmdl_c', 'maps/x.vmap_c' or 'a/t.vtex_c' under `out_dir`."""
     return out_dir / Path(path.removesuffix("_c")).with_suffix(suffix)
 
+
+def slice_index(path: Path, stem: str) -> int | None:
+    """The slice number in a texture-array export, or None for an unrelated file.
+
+    Source2Viewer names a single-slice array 'name.exr' and a longer one
+    'name_f00.exr', 'name_f01.exr' and so on.
+    """
+    name = Path(path).stem
+    if name == stem:
+        return 0
+    prefix = stem + "_f"
+    if not name.startswith(prefix):
+        return None
+    try:
+        return int(name[len(prefix):])
+    except ValueError:
+        return None
+
+
+def exported_slices(out_dir: Path, path: str, suffix: str = ".exr") -> dict[int, Path]:
+    """Slices of a texture array already exported under `out_dir`, by array index."""
+    base = Path(path.removesuffix("_c"))
+    folder = Path(out_dir) / base.parent
+    if not folder.is_dir():
+        return {}
+    found = {}
+    wants = suffix.lower()
+    for candidate in folder.iterdir():
+        if candidate.suffix.lower() != wants:
+            continue
+        index = slice_index(candidate, base.stem)
+        if index is not None:
+            found.setdefault(index, candidate)
+    return found
+
 WINDOWS_MAX_PATH = 259  # characters; Blender cannot open longer paths even with Windows long paths on
 
 
@@ -284,6 +319,54 @@ class Converter:
         """
         options = ["--texture_decode_flags", "none"] if raw else []
         return self._convert(package, path, out_dir, suffix, options)
+
+    def export_texture_slices(
+        self,
+        package: Path,
+        path: str,
+        out_dir: Path,
+        keep: set[int] | None = None,
+        suffix: str = ".exr",
+    ) -> dict[int, Path]:
+        """Convert a texture array and copy only the wanted slices into `out_dir`.
+
+        The converter writes every slice of an array, and a map's cubemap array
+        can hold a hundred of them. They are decoded into a staging folder and
+        only `keep` is copied out, so a build does not leave gigabytes behind.
+        Returns the copied files by array index.
+        """
+        path = path if path.endswith("_c") else path + "_c"
+        existing = exported_slices(out_dir, path, suffix)
+        if existing and (keep is None or keep.issubset(existing)):
+            return {index: file for index, file in existing.items() if keep is None or index in keep}
+        base = Path(path.removesuffix("_c"))
+        result = Path(out_dir) / base.with_suffix(suffix)
+        if sys.platform == "win32" and len(str(result)) > WINDOWS_MAX_PATH:
+            raise ConverterError(_too_long(result))
+        staging = Path(out_dir).parent / proc.staging_name(STAGING_PREFIX)
+        try:
+            Path(out_dir).parent.mkdir(parents=True, exist_ok=True)
+            _remove_abandoned(Path(out_dir).parent)
+            shutil.rmtree(staging, ignore_errors=True)
+            staging.mkdir()
+            self._run(["-i", str(package), "-o", str(staging), "-d", "-f", path], timeout=EXPORT_TIMEOUT)
+            staged = exported_slices(staging, path, suffix)
+            if not staged:
+                raise ConverterError(f"The converter finished but did not write the slices of {base.name}.")
+            folder = Path(out_dir) / base.parent
+            folder.mkdir(parents=True, exist_ok=True)
+            copied = {}
+            for index, file in staged.items():
+                if keep is not None and index not in keep:
+                    continue
+                target = folder / file.name
+                shutil.copy2(file, target)
+                copied[index] = target
+            return copied
+        except OSError as exc:
+            raise ConverterError(f"Could not store the converted files in {out_dir}: {exc}") from exc
+        finally:
+            shutil.rmtree(staging, ignore_errors=True)
 
     def export_model(self, package: Path, model_path: str, out_dir: Path, clips: list[str], materials: bool) -> Path:
         """Export a model with the named clips. A model exported without a clip has no skeleton."""

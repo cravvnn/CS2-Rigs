@@ -5,7 +5,7 @@ from __future__ import annotations
 import bpy
 from mathutils import Vector
 
-from . import importer
+from . import hdri, importer
 from .core import studio as studio_core
 from .core import targets
 
@@ -371,7 +371,10 @@ def _apply_framing_and_lights(
     backdrop.hide_render = not backdrop_on
     backdrop.hide_set(not backdrop_on)
 
-    # Studio world fill (preserve an active CS2 map sky when Backdrop is off).
+    # A CS2 HDRI, standalone or a loaded map's own sky, keeps lighting the subject:
+    # the studio's lights and backdrop complement it instead of replacing it.
+    if hdri.is_cs2_sky_world(scene.world):
+        return
     if backdrop_on or scene.world is None or not scene.world.get("cs2rig_map"):
         scene.world = _ensure_world(preset)
 
@@ -450,6 +453,8 @@ def apply_studio_look(
         backdrop_obj.hide_render = not backdrop
         backdrop_obj.hide_set(not backdrop)
 
+    if hdri.is_cs2_sky_world(scene.world):
+        return True
     if backdrop or scene.world is None or not scene.world.get("cs2rig_map"):
         scene.world = _ensure_world(preset)
     return True

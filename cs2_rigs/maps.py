@@ -16,7 +16,13 @@ from .core import log as log_mod
 from .core import maplib, maplights, proc
 from .core.catalog import GameMap
 from .core.converter import failure_message
-from .map_build import MAP_NAME_PROP, SKY_WORLD_PROP
+from .map_build import (
+    MAP_NAME_PROP,
+    PROBE_INDEX_PROP,
+    PROBE_WORLDS_PROP,
+    SKY_WORLD_PROP,
+    WORLD_KIND_PROP,
+)
 from .session import Session
 
 BUILD_SCRIPT = Path(__file__).with_name("map_build.py")
@@ -117,6 +123,7 @@ def _write_extras(session: Session, game_map: GameMap, export_dir: Path) -> Path
             Path(session.install.main_package),
             game_map.name,
             export_dir / "sky",
+            export_dir / "probes",
         )
     except Exception as exc:  # the geometry is still worth building
         log_mod.logger.warning("could not read the sky and lights of %s: %s", game_map.name, exc)
@@ -336,6 +343,12 @@ def remove_map(scene: bpy.types.Scene, name: str) -> None:
     bpy.data.batch_remove([data for data in datas if data.users == 0])
     if map_world is not None and map_world.users == 0:
         bpy.data.worlds.remove(map_world)
+    # Copied maps own their probe worlds; linked ones live in the map's library.
+    for world in list(bpy.data.worlds):
+        if world.get(MAP_NAME_PROP) == name and world.library is None and (
+            world.users == 0 or (world.users == 1 and world.use_fake_user)
+        ):
+            bpy.data.worlds.remove(world)
 
 
 def sky_world_name(name: str) -> str:
@@ -364,6 +377,8 @@ def _map_world(name: str, library: Path | None, collection: bpy.types.Collection
     for world in bpy.data.worlds:
         if world.get(MAP_NAME_PROP) != name:
             continue
+        if world.get(WORLD_KIND_PROP, "sky") != "sky":
+            continue
         if source_file is not None:
             if world.library is not None and Path(bpy.path.abspath(world.library.filepath)) == source_file:
                 return world
@@ -382,6 +397,84 @@ def _map_world(name: str, library: Path | None, collection: bpy.types.Collection
     except (OSError, RuntimeError):
         return None
     return target.worlds[0] if target.worlds else None
+
+
+def probe_worlds(collection: bpy.types.Collection) -> list[dict]:
+    """The indoor cubemap worlds a built map carries, best first."""
+    raw = collection.get(PROBE_WORLDS_PROP)
+    if not raw:
+        return []
+    try:
+        data = json.loads(raw)
+    except (TypeError, ValueError):
+        return []
+    if not isinstance(data, list):
+        return []
+    return [item for item in data if isinstance(item, dict) and item.get("world")]
+
+
+def _stored_world(
+    name: str,
+    kind: str,
+    index: int,
+    world_name: str,
+    library: Path | None,
+    link: bool,
+) -> bpy.types.World | None:
+    """A map's sky or probe World from its library, linked or copied to match the map."""
+    source_file = Path(bpy.path.abspath(str(library))) if library is not None else None
+    for world in bpy.data.worlds:
+        if world.get(MAP_NAME_PROP) != name or world.get(WORLD_KIND_PROP) != kind:
+            continue
+        if kind == "probe" and int(world.get(PROBE_INDEX_PROP, -1)) != index:
+            continue
+        if not link:
+            if world.library is None:
+                return world
+        elif world.library is not None and Path(bpy.path.abspath(world.library.filepath)) == source_file:
+            return world
+    if library is None:
+        return None
+    library = Path(bpy.path.abspath(str(library)))
+    if not library.is_file():
+        return None
+    try:
+        with bpy.data.libraries.load(str(library), link=link) as (source, target):
+            if world_name not in source.worlds:
+                return None
+            target.worlds = [world_name]
+    except (OSError, RuntimeError):
+        return None
+    return target.worlds[0] if target.worlds else None
+
+
+def apply_map_probes(
+    scene: bpy.types.Scene,
+    name: str,
+    library: Path | None,
+    collection: bpy.types.Collection,
+    index: int | None = None,
+) -> int | None:
+    """Light the scene with one of this map's indoor cubemap HDRI probes.
+
+    Returns the probe's array index, or None when the map was built without
+    probes. `index` picks a probe; without it the most indoor one is used.
+    """
+    probes = probe_worlds(collection)
+    if not probes:
+        return None
+    fallback = probes[0] if index is None else None
+    chosen = next((probe for probe in probes if int(probe.get("index", -1)) == index), fallback)
+    if chosen is None:
+        return None
+    link = collection.library is not None
+    source = Path(bpy.path.abspath(collection.library.filepath)) if collection.library is not None else library
+    world = _stored_world(name, "probe", int(chosen["index"]), str(chosen["world"]), source, link)
+    if world is None:
+        return None
+    scene.world = world
+    show_map_lights(collection, True)
+    return int(chosen["index"])
 
 
 def _plain_world() -> bpy.types.World:

@@ -28,7 +28,9 @@ ENUM_ITEMS = {
     "cs2rig_skin": lambda: cs2_rigs._skin_enum(None, bpy.context),
     "cs2rig_glove": lambda: cs2_rigs._glove_items,
     "cs2rig_map": lambda: cs2_rigs._map_items,
+    "cs2rig_map_probe": lambda: cs2_rigs._probe_items(None, bpy.context),
     "cs2rig_sticker_slot": lambda: cs2_rigs._sticker_slot_items,
+    "cs2rig_hdri": lambda: cs2_rigs._hdri_items,
 }
 
 
@@ -311,6 +313,11 @@ def draw_full(context):
     assert bpy.ops.cs2rig.set_follow(prop="weapon_in_hand", on=True) == {"FINISHED"}
     wm.cs2rig_map = "de_dust2_vanity"
     assert bpy.ops.cs2rig.add_map() == {"FINISHED"}
+    top = cs2_rigs.maps.maps_in_scene(context.scene)["de_dust2_vanity"]
+    if not cs2_rigs.maps.probe_worlds(top):
+        assert bpy.ops.cs2rig.add_map(name="de_dust2_vanity", rebuild=True) == {"FINISHED"}
+        top = cs2_rigs.maps.maps_in_scene(context.scene)["de_dust2_vanity"]
+    assert cs2_rigs.maps.probe_worlds(top), "the built map has no cubemap probe"
     wm.cs2rig_clip = "world/rifle/_default_rifle/run_n_rifle"
     assert bpy.ops.cs2rig.load_clip() == {"FINISHED"}
 
@@ -354,6 +361,9 @@ LABELS = {
     cs2_rigs.CS2RIG_OT_remove_studio: "Remove Studio",
     cs2_rigs.CS2RIG_OT_frame_studio: "Frame Subject",
     cs2_rigs.CS2RIG_OT_toggle_turntable: "Turntable",
+    cs2_rigs.CS2RIG_OT_apply_map_probes: "Apply Indoor Cubemap",
+    cs2_rigs.CS2RIG_OT_apply_hdri: "Apply HDRI",
+    cs2_rigs.CS2RIG_OT_remove_hdri: "Remove HDRI",
     cs2_rigs.CS2RIG_OT_apply_sticker: "Apply Sticker",
     cs2_rigs.CS2RIG_OT_remove_sticker: "Remove Sticker",
     cs2_rigs.CS2RIG_OT_clear_stickers: "Clear All",
@@ -374,6 +384,10 @@ PROPERTY_NAMES = {
     "cs2rig_map": "Map",
     "cs2rig_map_link": "Link to Map File",
     "cs2rig_map_sky": "Map Sky & Lights",
+    "cs2rig_map_probe": "Cubemap Probe",
+    "cs2rig_hdri": "CS2 HDRI",
+    "cs2rig_hdri_strength": "HDRI Strength",
+    "cs2rig_hdri_rotation": "HDRI Rotation",
     "cs2rig_clip": "Clip",
     "cs2rig_studio_preset": "Lighting",
     "cs2rig_studio_backdrop": "Backdrop",
@@ -441,7 +455,45 @@ solo_closed = draw("standalone weapon, collapsed", context, all_closed=True)
 assert solo_closed["sections"]["cs2rig_weapon"]["header_texts"] == ["Weapon", "AK-47 · Bloodsport"]
 assert solo_closed["sections"]["cs2rig_stickers"]["header_texts"] == ["Stickers", "1 sticker"]
 assert bpy.ops.cs2rig.clear_stickers() == {"FINISHED"}
+
+# A real CS2 sky lights a standalone weapon with no map and no studio.
 assert bpy.ops.cs2rig.remove_skin() == {"FINISHED"}
+assert cs2_rigs._hdri_items, "the CS2 skies were not listed"
+assert "mirage" in {item[0] for item in cs2_rigs._hdri_items}
+wm.cs2rig_hdri = "mirage"
+assert bpy.ops.cs2rig.apply_hdri() == {"FINISHED"}
+hdri_world = context.scene.world
+assert hdri_world is not None and hdri_world.get("cs2rig_hdri")
+assert hdri_world.name == "CS2 HDRI Mirage"
+hdri_on = draw("standalone weapon, lit by a CS2 HDRI", context)
+assert {"cs2rig_hdri", "cs2rig_hdri_strength", "cs2rig_hdri_rotation"} <= set(hdri_on["names"])
+for expected in ("cs2rig.apply_hdri", "cs2rig.remove_hdri", "cs2rig.add_studio"):
+    assert expected in hdri_on["operators"], f"the panel did not draw {expected}"
+hdri_closed = draw("standalone weapon, lit by a CS2 HDRI, closed", context, all_closed=True)
+assert hdri_closed["sections"]["cs2rig_studio"]["header_texts"] == ["Studio", "HDRI Mirage"], hdri_closed[
+    "sections"
+]["cs2rig_studio"]
+wm.cs2rig_hdri_strength = 3.0
+wm.cs2rig_hdri_rotation = 40.0
+assert abs(cs2_rigs.hdri.strength(context.scene) - 3.0) < 1e-4
+assert abs(cs2_rigs.hdri.rotation(context.scene) - (-90.0 + 40.0)) < 1e-4
+assert bpy.ops.cs2rig.add_studio() == {"FINISHED"}
+assert context.scene.world is hdri_world, "Add Studio replaced the CS2 HDRI"
+wm.cs2rig_studio_backdrop = False
+assert context.scene.world is hdri_world, "turning the backdrop off replaced the CS2 HDRI"
+wm.cs2rig_studio_preset = "dark"
+assert context.scene.world is hdri_world, "the lighting preset replaced the CS2 HDRI"
+assert bpy.ops.cs2rig.remove_studio() == {"FINISHED"}
+assert context.scene.world is hdri_world, "removing the studio took the CS2 HDRI with it"
+wm.cs2rig_studio_backdrop = True
+wm.cs2rig_studio_preset = "studio"
+assert bpy.ops.cs2rig.remove_hdri() == {"FINISHED"}
+assert context.scene.world is None
+# Without a CS2 HDRI, the studio brings its own world again.
+assert bpy.ops.cs2rig.add_studio() == {"FINISHED"}
+assert context.scene.world is not None and context.scene.world.get("cs2rig_studio_world")
+assert bpy.ops.cs2rig.remove_studio() == {"FINISHED"}
+assert context.scene.world is None
 assert bpy.ops.cs2rig.remove_weapon() == {"FINISHED"}
 
 # First-Person arms workflow (POV Camera replaces Pose Controls, viewmodel clips offered).
@@ -492,9 +544,13 @@ for expected in (
     "cs2rig_glove_wear",
     "cs2rig_glove_seed",
     "cs2rig_map_sky",
+    "cs2rig_map_probe",
     "cs2rig_match_clips",
     "cs2rig_studio_preset",
     "cs2rig_studio_backdrop",
+    "cs2rig_hdri",
+    "cs2rig_hdri_strength",
+    "cs2rig_hdri_rotation",
     '["ik_arm_L"]',
 ):
     assert expected in full["names"], f"the panel did not draw {expected}"
@@ -510,6 +566,9 @@ for expected in (
     "cs2rig.add_map",
     "cs2rig.remove_map",
     "cs2rig.apply_map_sky",
+    "cs2rig.apply_map_probes",
+    "cs2rig.apply_hdri",
+    "cs2rig.remove_hdri",
     "cs2rig.add_studio",
     "cs2rig.build_clip_previews",
     "cs2rig.fix_eyes",
@@ -538,8 +597,17 @@ assert closed["sections"]["cs2rig_gloves"]["header_texts"] == ["Gloves", "Driver
 assert closed["sections"]["cs2rig_animation"]["header_texts"] == ["Animation", "run_n_rifle"]
 assert closed["sections"]["cs2rig_pose"]["header_texts"] == ["Pose Controls", "On"]
 assert closed["sections"]["cs2rig_map"]["header_texts"] == ["Map", "de_dust2_vanity"]
-assert closed["sections"]["cs2rig_studio"]["header_texts"] == ["Studio", "Off"]
+assert closed["sections"]["cs2rig_studio"]["header_texts"] == ["Studio", "HDRI Dust II"]
 assert closed["sections"]["cs2rig_tools"]["header_texts"] == ["Tools"]
+
+# Switch the map between its real sky and its baked indoor cubemap probe.
+assert bpy.ops.cs2rig.apply_map_probes(name="de_dust2_vanity") == {"FINISHED"}
+probe_closed = draw("map lit by its indoor cubemap probe, collapsed", context, all_closed=True)
+probe_header = probe_closed["sections"]["cs2rig_map"]["header_texts"]
+assert probe_header[0] == "Map" and probe_header[1].startswith("de_dust2_vanity · Cubemap"), probe_header
+assert bpy.ops.cs2rig.apply_map_sky(name="de_dust2_vanity") == {"FINISHED"}
+sky_closed = draw("map back on its real sky, collapsed", context, all_closed=True)
+assert sky_closed["sections"]["cs2rig_map"]["header_texts"] == ["Map", "de_dust2_vanity"]
 
 # Studio Kit active, turntable toggled on, then cleanly removed.
 assert bpy.ops.cs2rig.add_studio() == {"FINISHED"}

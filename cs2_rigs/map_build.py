@@ -29,6 +29,10 @@ else:
 
 MAP_NAME_PROP = "cs2rig_map"
 SKY_WORLD_PROP = "cs2rig_sky_world"
+PROBE_WORLDS_PROP = "cs2rig_probe_worlds"
+WORLD_KIND_PROP = "cs2rig_world_kind"
+PROBE_INDEX_PROP = "cs2rig_probe_index"
+PROBE_LABEL_PROP = "cs2rig_probe_label"
 LIGHT_CLASS_PROP = "cs2rig_light_class"
 LIGHT_TARGET_PROP = "cs2rig_light_target"
 MAP_EXTRAS_VERSION = maplights.MANIFEST_VERSION
@@ -113,6 +117,9 @@ def build(glb: Path, out: Path, name: str, extras_path: Path | None = None) -> d
     world = _add_sky_world(extras.get("sky") if extras is not None else None, name)
     if world is not None:
         top[SKY_WORLD_PROP] = world.name
+    probe_worlds = _add_probe_worlds(extras.get("probes") if extras is not None else None, name)
+    if probe_worlds:
+        top[PROBE_WORLDS_PROP] = json.dumps(probe_worlds, separators=(",", ":"))
     top["cs2rig_light_count"] = counts.get(LIGHTS, 0)
 
     out.parent.mkdir(parents=True, exist_ok=True)
@@ -194,11 +201,8 @@ def _area_shape(light: dict) -> str:
     return "RECTANGLE"
 
 
-def _add_sky_world(sky: dict | None, name: str) -> bpy.types.World | None:
-    """Build and pack the map's real sky, or return None when it has none."""
-    if not sky or not sky.get("file"):
-        return None
-    path = Path(str(sky["file"]))
+def _load_equirect(path: Path, image_name: str) -> bpy.types.Image | None:
+    """Load a 2:1 image and pack it, or return None when the file is missing or the wrong shape."""
     if not path.is_file():
         return None
     try:
@@ -207,24 +211,27 @@ def _add_sky_world(sky: dict | None, name: str) -> bpy.types.World | None:
         return None
     width, height = image.size
     if width != height * 2:
-        # Only lat-long skies can drive Blender's equirectangular environment.
+        # Only lat-long images can drive Blender's equirectangular environment.
         bpy.data.images.remove(image)
-        print("MAP SKY skipped: not a 2:1 equirectangular image", width, height)
+        print("MAP IMAGE skipped: not a 2:1 equirectangular image", width, height)
         return None
-    image.name = f"CS2 Sky {name}"
+    image.name = image_name
     try:
         image.colorspace_settings.name = "Linear Rec.709"
     except TypeError:
         pass
     image.pack()
+    return image
 
-    world = bpy.data.worlds.new(f"CS2 Sky {name}")
-    world.use_fake_user = True  # the library must keep it without a scene using it
-    world[MAP_NAME_PROP] = name
-    world["cs2rig_sky_material"] = str(sky.get("material") or "")
-    world["cs2rig_sky_texture"] = str(sky.get("texture") or "")
-    world["cs2rig_sky_rotation"] = float(sky.get("rotation") or 0.0)
-    world["cs2rig_sky_strength"] = float(sky.get("strength") or 0.0)
+
+def _environment_world(
+    world: bpy.types.World,
+    image: bpy.types.Image,
+    rotation: float,
+    strength: float,
+    tint: tuple[float, float, float] | None = None,
+) -> None:
+    """Point a world at an equirectangular image, turned to Blender's u = 0.5 at +X."""
     world.use_nodes = True
     nodes = world.node_tree.nodes
     links = world.node_tree.links
@@ -233,19 +240,18 @@ def _add_sky_world(sky: dict | None, name: str) -> bpy.types.World | None:
     coord = nodes.new("ShaderNodeTexCoord")
     mapping = nodes.new("ShaderNodeMapping")
     mapping.vector_type = "VECTOR"
-    mapping.inputs["Rotation"].default_value = (0.0, 0.0, math.radians(float(sky.get("rotation") or 0.0)))
+    mapping.inputs["Rotation"].default_value = (0.0, 0.0, math.radians(rotation))
     environment = nodes.new("ShaderNodeTexEnvironment")
     environment.projection = "EQUIRECTANGULAR"
     environment.interpolation = "Linear"
     environment.image = image
     background = nodes.new("ShaderNodeBackground")
-    background.inputs["Strength"].default_value = float(sky.get("strength") or 1.0)
+    background.inputs["Strength"].default_value = strength
     output = nodes.new("ShaderNodeOutputWorld")
 
-    tint = tuple(sky.get("tint") or (1.0, 1.0, 1.0))[:3]
     links.new(coord.outputs["Generated"], mapping.inputs["Vector"])
     links.new(mapping.outputs["Vector"], environment.inputs["Vector"])
-    if any(abs(channel - 1.0) > 1e-3 for channel in tint):
+    if tint is not None and any(abs(channel - 1.0) > 1e-3 for channel in tint):
         multiply = nodes.new("ShaderNodeVectorMath")
         multiply.operation = "MULTIPLY"
         multiply.inputs[1].default_value = tint
@@ -254,7 +260,68 @@ def _add_sky_world(sky: dict | None, name: str) -> bpy.types.World | None:
     else:
         links.new(environment.outputs["Color"], background.inputs["Color"])
     links.new(background.outputs["Background"], output.inputs["Surface"])
+
+
+def _add_sky_world(sky: dict | None, name: str) -> bpy.types.World | None:
+    """Build and pack the map's real sky, or return None when it has none."""
+    if not sky or not sky.get("file"):
+        return None
+    image = _load_equirect(Path(str(sky["file"])), f"CS2 Sky {name}")
+    if image is None:
+        return None
+
+    world = bpy.data.worlds.new(f"CS2 Sky {name}")
+    world.use_fake_user = True  # the library must keep it without a scene using it
+    world[MAP_NAME_PROP] = name
+    world[WORLD_KIND_PROP] = "sky"
+    world["cs2rig_sky_material"] = str(sky.get("material") or "")
+    world["cs2rig_sky_texture"] = str(sky.get("texture") or "")
+    world["cs2rig_sky_rotation"] = float(sky.get("rotation") or 0.0)
+    world["cs2rig_sky_strength"] = float(sky.get("strength") or 0.0)
+    _environment_world(
+        world,
+        image,
+        float(sky.get("rotation") or 0.0),
+        float(sky.get("strength") or 1.0),
+        tuple(sky.get("tint") or (1.0, 1.0, 1.0))[:3],
+    )
     return world
+
+
+def _add_probe_worlds(probes: list[dict] | None, name: str) -> list[dict]:
+    """Build, pack and list the map's indoor cubemap worlds."""
+    worlds = []
+    for probe in probes or ():
+        if not probe.get("file"):
+            continue
+        index = int(probe.get("index", -1))
+        if index < 0:
+            continue
+        image = _load_equirect(Path(str(probe["file"])), f"CS2 Probe {name} {index}")
+        if image is None:
+            continue
+        world = bpy.data.worlds.new(f"CS2 Probe {name} {index}")
+        world.use_fake_user = True  # the library must keep it without a scene using it
+        world[MAP_NAME_PROP] = name
+        world[WORLD_KIND_PROP] = "probe"
+        world[PROBE_INDEX_PROP] = index
+        world[PROBE_LABEL_PROP] = str(probe.get("label") or f"Cubemap {index}")
+        probe_rot = float(probe.get("rotation") or 0.0)
+        probe_str = float(probe.get("strength") or 1.0)
+        world["cs2rig_sky_rotation"] = probe_rot
+        world["cs2rig_sky_strength"] = probe_str
+        _environment_world(world, image, probe_rot, probe_str)
+        worlds.append(
+            {
+                "index": index,
+                "label": str(probe.get("label") or f"Cubemap {index}"),
+                "world": world.name,
+                "strength": float(probe.get("strength") or 1.0),
+                "indoor": int(probe.get("indoor", 0)),
+                "origin": list(probe.get("origin") or (0.0, 0.0, 0.0)),
+            }
+        )
+    return worlds
 
 
 if __name__ == "__main__":

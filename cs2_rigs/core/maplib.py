@@ -15,7 +15,7 @@ from pathlib import Path
 from . import proc
 
 STAMP_NAME = "build.json"
-STAMP_VERSION = 2  # 2: maps built with their real sky and lights
+STAMP_VERSION = 3  # 3: maps built with their real sky, lights and indoor cubemap probes
 
 
 def library_file(map_dir: Path, name: str) -> Path:
