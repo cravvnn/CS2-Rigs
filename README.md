@@ -21,7 +21,7 @@ Import any agent with a posable rig, put a weapon in their hands with the finish
 you want, play the game's own animation clips and stand them in a real map. Everything
 is converted from the game files on your disk, offline.
 
-**Current release: 0.3.0-alpha · Windows x64 · Blender 5.3.**
+**Current release: 0.4.0-alpha · Windows x64 · Blender 5.3.**
 
 > **Alpha.** Expect rough edges and report what breaks. CS2 Rigs only reads the
 > game files on disk. It never opens, injects into or talks to the running game.
@@ -40,8 +40,8 @@ is converted from the game files on your disk, offline.
    After that, opening a saved file fills the lists and matches them to the agent in it.
 5. Choose an agent and press **Import Agent**, then **Hold Weapon**, **Apply Finish**, **Load Clip** and **Add Pose Controls**.
 
-The tab is split into **Agent**, **Weapon**, **Gloves**, **Animation**, **Pose Controls**, **Map** and **Tools**.
-Each section's header shows what is in it, such as the held weapon and its finish, and the top of the tab says
+The tab is split into **Agent**, **Weapon**, **Stickers**, **Gloves**, **Animation**, **Pose Controls** (or **POV Camera** for first-person rigs), **Map**, **Studio** and **Tools**.
+Collapsed section headers show what is in them, such as the held weapon and its finish, and the top of the tab says
 what to do next. A failed step stays at the top with **Open Log Folder** until the next step works.
 
 The game is found through Steam. If it is somewhere unusual, set **Game Folder** in the add-on preferences.
@@ -56,12 +56,12 @@ The game is found through Steam. If it is somewhere unusual, set **Game Folder**
 
 ## Features
 
-- **Agents.** All agents with their materials, posed by the game's skeleton. The lists use the game's English names.
-- **Weapons.** Every weapon and knife, held on the agent's weapon bone so it follows the clip.
-- **Finishes.** Weapon, knife and glove finishes built the way the game builds them, with **Weapon Wear** and **Weapon Seed**.
-- **Animation clips.** Every game clip made for agents, gameplay and menu poses, filtered to the held weapon.
+- **Agents & first-person arms.** All third-person agents with their materials and skeleton, plus first-person viewmodel arms with agent sleeves, custom gloves and a calibrated Source 2 POV camera.
+- **Weapons.** Every weapon and knife, either held by an agent/first-person rig (automatically posed with its idle clip) or imported standalone without an agent.
+- **Finishes & stickers.** Weapon, knife and glove finishes built the way the game builds them, plus live UV-layered stickers across 11,918 kits with scrape wear, foil/holo shaders and custom offset/scale/rotation.
+- **Animation clips.** Every third-person and viewmodel game clip, filtered to the held weapon, with a visual Clip Browser.
 - **Pose controls.** IK/FK arms and legs, foot roll, toe, twist bones, and weapon and hand follow switches.
-- **Maps.** Game maps built once into their own file, then linked or copied into your scene.
+- **Maps & lighting.** Game maps with their real HDR `.exr` skybox, calibrated sun and interior lights, and baked indoor cubemap probes — plus a one-click **Studio** kit with 3-point lighting, turntable and a standalone 21-sky CS2 HDRI picker.
 
 ### Agents and clips
 
@@ -164,11 +164,25 @@ in the cache across game updates; a map built from older game files still loads,
 and its row offers **Rebuild** when newer game files would make a better one. A
 map whose file is gone shows as a missing row; **X** takes it out.
 
-Maps come with the game's sun but no baked lighting, so a scene without a world
-gets a plain sky for fill light. Names ending in `_vanity` are the small scenes
+Maps come with the game's real HDR `.exr` skybox, calibrated sun and interior lights, and baked indoor cubemap HDR probes (switchable per map via the sky/cubemap buttons and **Cubemap Probe** list). Names ending in `_vanity` are the small scenes
 the game shows behind its menus.
 
 ![Dust II from above](docs/map-dust2.png)
+
+### Studio and CS2 HDRIs
+
+Open **Studio** to light any scene in one click:
+
+- **CS2 HDRI:** pick from 21 in-game CS2 skies (`Dust II`, `Mirage`, `Inferno`, `Nuke`, `Ancient`, `Anubis`, `Vertigo`, `Rain Night`, etc.) without building a map, with live **HDRI Strength** and **HDRI Rotation** sliders that also drive loaded map skies and cubemap probes.
+- **Add Studio:** adds 3-point area lighting (`Studio`, `Dark` or `Rim`), a toggleable 360° seamless backdrop, a 65 mm framed camera (**Frame Subject**), and a smooth **Turntable** orbit that leaves agent animation intact. Studio preserves any active CS2 HDRI or map sky.
+
+### First-person arms and POV camera
+
+In **Agent**, press **Import First-Person** to bring in the game's viewmodel arms with the chosen agent's sleeves and gloves plus a calibrated Source 2 POV camera. **Hold Weapon**, **Apply Finish**, **Apply Gloves**, **Stickers** and **Animation** (all 678 `viewmodel/` clips) work the same way as on third-person agents. Use the **POV Camera** section to switch between `Classic (68°)`, `Desktop (60°)` and custom FOV/offset settings, or press **Look Through POV Camera**.
+
+### Stickers
+
+With any weapon selected (held, first-person or standalone), open **Stickers**, pick a slot (1–5), search across all 11,918 weapon stickers and press **Apply Sticker**. Stickers are layered live in the shader on native weapon UVs so **Scrape**, **Offset X/Y**, **Scale** and **Rotation** update immediately and survive weapon finish swaps and save/reopen.
 
 ### Cache
 
@@ -213,17 +227,15 @@ passes on Valve's assets with it; share renders, or files with linked maps and n
 
 This is an alpha. Not done yet:
 
-- **Stickers.**
 - **Glove finishes:** the anisotropic gloss of a few newer silk finishes is not reproduced,
   and Blender's cloth sheen is a little softer than the game's.
-- **Render-time effects** such as pearlescence, glitter and iridescence.
+- **Render-time effects** such as pearlescence, glitter and iridescence (and glitter/lenticular sticker effects).
 - **Dual Berettas:** the left pistol does not follow the clip.
 - **Weapon parts in clips** move only in clips made for the held weapon: a butterfly
   knife spins open in its own draw and an AK-47's magazine drops in its own reload, but
   a clip made for another weapon leaves the parts still. The parts have no controls.
-- **Maps** have no baked lighting and cannot be cropped to an area yet.
-- **Pose controls:** no torso or hip controls; twist bone weights are estimates.
-- **Third person only;** first-person arms are not set up.
+- **Maps** have no baked lightmaps and cannot be cropped to an area yet.
+- **Pose controls:** no torso or hip controls; twist bone weights are estimates; first-person rigs use game clips and FK rather than custom IK.
 - **Long paths:** Blender cannot open files whose path is over 259 characters. With a
   long Windows user name or a deep **Cache Folder** a conversion fails before it starts,
   with an error saying how long the file's path would be; choose a short Cache Folder
