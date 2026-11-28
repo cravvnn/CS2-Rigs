@@ -246,6 +246,25 @@ def family_of_clip(clip: str) -> str:
     return parts[1] if len(parts) > 2 and parts[0] == "world" else ""
 
 
+def default_idle_clip(clips: list[str], weapon: Weapon | None, *, viewmodel: bool = False) -> str | None:
+    """Pick the standing idle clip for a weapon (third-person or viewmodel), so Hold Weapon puts it in the hands."""
+    if weapon is None:
+        return None
+    if viewmodel:
+        from . import viewmodel as vm_mod
+        matched = vm_mod.clips_for_fp_weapon(clips, weapon)
+    else:
+        matched = clips_for_weapon(clips, weapon)
+    for clip in matched:
+        leaf = clip.rsplit("/", 1)[-1]
+        if leaf.startswith("idle") and "crouch" not in leaf and "turn" not in leaf:
+            return clip
+    for clip in matched:
+        if "idle" in clip.rsplit("/", 1)[-1]:
+            return clip
+    return matched[0] if matched else None
+
+
 def clip_fits(clip: str, weapon: Weapon | None) -> bool:
     return weapon is None or family_of_clip(clip) in (clip_family(weapon), SHARED_CLIP_FAMILY)
 

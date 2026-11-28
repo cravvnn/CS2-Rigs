@@ -327,7 +327,22 @@ def attach_weapon(context: bpy.types.Context, session: Session, armature: bpy.ty
     )
     root.matrix_basis.identity()
 
-    load_weapon_clip(context, session, armature)
+    action = armature.animation_data.action if armature.animation_data else None
+    current_clip = action.get(CLIP_KEY_PROP, "") if action is not None else ""
+    current_label = catalog_mod.clip_label(current_clip) if current_clip else ""
+    needs_idle = not current_clip or (not catalog_mod.clip_fits(current_label, weapon) and bool(catalog_mod.family_of_clip(current_label)))
+    if needs_idle:
+        clips = session.catalog().get("clips", [])
+        idle = catalog_mod.default_idle_clip(clips, weapon, viewmodel=is_viewmodel_arms(armature))
+        if idle:
+            try:
+                load_clip(context, session, armature, idle)
+            except RuntimeError:
+                load_weapon_clip(context, session, armature)
+        else:
+            load_weapon_clip(context, session, armature)
+    else:
+        load_weapon_clip(context, session, armature)
 
     _make_active(context, armature)
 

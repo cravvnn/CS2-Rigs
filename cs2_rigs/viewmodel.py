@@ -200,6 +200,7 @@ def import_viewmodel(
         collection.objects.link(obj)
 
     armature.name = f"{agent.label}.fp_skeleton"
+    armature.data.display_type = "STICK"
     armature.parent = fp_root
     armature.matrix_parent_inverse.identity()
     armature[targets.ROLE_PROP] = targets.VIEWMODEL_ARMS_ROLE
